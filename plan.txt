@@ -1,0 +1,251 @@
+﻿Deep Architectural Synthesis for Hindi-Marathi Neural Machine Translation: Pretraining Bidirectional and Autoregressive Representations with RoPE, GQA, and RMSNorm
+The modern landscape of Natural Language Processing has undergone a fundamental shift toward the utilization of large-scale pretrained representations. In the context of the AdiVaani Initiative at MISN Lab, IIT Delhi, the objective of developing robust neural machine translation systems for underrepresented and morphologically rich languages like Hindi and Marathi necessitates a move away from classical recurrent architectures toward highly optimized Transformer-based models.1 This report provides an exhaustive analysis of the research and implementation strategies required to construct an advanced translation framework from the ground up, utilizing a bidirectional BERT-like encoder and an autoregressive GPT-style decoder, both incorporating state-of-the-art architectural modifications to enhance performance, efficiency, and stability.
+Theoretical Foundations of Modern Transformer Block Modifications
+The original Transformer architecture, while revolutionary, introduced several bottlenecks in terms of positional awareness, memory efficiency during inference, and computational overhead in normalization layers.2 To address these issues, the current research prioritizes three primary architectural enhancements: Rotary Positional Embeddings, Grouped Query Attention, and Root Mean Square Layer Normalization.
+Rotary Positional Embeddings: A Comprehensive Derivation
+Traditional positional encoding methods, such as the sinusoidal encodings introduced in the seminal "Attention Is All You Need" paper, rely on additive vectors that are injected into the input embeddings.4 While elegant, these methods lack a direct mathematical relationship between the attention scores and the relative distance between tokens. Furthermore, learned absolute positional embeddings, as used in the original BERT and GPT-2 models, are constrained by a fixed maximum sequence length, failing to extrapolate to longer contexts.6
+Rotary Positional Embeddings (RoPE) resolve these limitations by encoding positional information through a multiplicative rotation in the vector space.8 For a hidden state    at position   , the transformation is defined by applying a rotation matrix    to pairs of dimensions in the vector   .8 If we consider a two-dimensional subspace of the embedding   , the rotation is expressed as follows:
+  
+
+The rotation frequency    is determined by the dimension index   , following the formula   .9 In a high-dimensional setting such as a 768-dimensional embedding, the vector is partitioned into 384 pairs, each rotated by its respective frequency. The most profound insight of RoPE is that the dot-product attention between a query    at position    and a key    at position    becomes a function of their relative distance    9:
+  
+
+This mathematical property ensures that the attention mechanism is inherently relative-position-aware without the need for additional biases or learned parameters.11 For Hindi and Marathi translation, this is critical because word order reordering—common in Indo-Aryan languages—can be better captured when the model understands the precise relative distance between syntactic dependencies, regardless of their absolute position in the sentence.13
+Memory and Bandwidth Optimization via Grouped Query Attention
+As the demand for longer context windows and higher inference throughput increases, the memory bandwidth required to load the Key-Value (KV) cache becomes the primary performance bottleneck in autoregressive models like GPT-2.15 In standard Multi-Head Attention (MHA), every query head has a corresponding unique set of key and value heads. For a model with 12 heads and a hidden dimension of 768, this requires storing and loading 12 key and 12 value projections for every token in the sequence.15
+Grouped Query Attention (GQA) provides a generalized optimization by allowing multiple query heads to share a single key-value head.19 By partitioning the    query heads into    groups, the KV cache size is reduced by a factor of   .15
+Attention Mechanism
+	Distinct KV Heads
+	KV Cache Size (Relative)
+	Quality vs. Speed Trade-off
+	Multi-Head Attention (MHA)
+	  
+
+	1.0x
+	Highest quality, highest memory pressure
+	Grouped Query Attention (GQA)
+	  
+ (  )
+	  
+x
+	Near-MHA quality, significantly faster
+	Multi-Query Attention (MQA)
+	1
+	  
+x
+	Lowest memory, potential quality degradation
+	In the implementation of a 124M parameter GPT-style model with 12 attention heads, choosing    results in 3 query heads sharing each KV head.17 This reduces the KV cache size by 66%, enabling larger batch sizes and faster generation speeds on consumer hardware without the performance drop often seen in Multi-Query Attention.16 For a translation task involving complex Hindi and Marathi scripts, where subword tokenization often results in longer sequences compared to English, this efficiency is vital for maintaining real-time responsiveness.21
+Computational Stability through Root Mean Square Layer Normalization
+Normalization is an indispensable component of deep neural networks, serving to stabilize the distribution of activations and gradients throughout the model stack.23 The standard Layer Normalization (LayerNorm) operation involves two distinct steps: recentering (subtracting the mean) and rescaling (dividing by the standard deviation).23
+Recent empirical research has suggested that the mean-centering operation in LayerNorm is computationally redundant and provides negligible benefit to the overall expressivity of the model.26 Root Mean Square Layer Normalization (RMSNorm) simplifies the process by performing only the rescaling operation based on the root mean square of the activations:
+  
+
+where    is a learned scaling parameter.25 By removing the mean calculation and the bias term   , RMSNorm reduces the number of arithmetic operations and memory transfers required.26 Evidence from large-scale model training (e.g., Llama and PaLM) indicates that RMSNorm often achieves a lower final loss and provides more stable gradient flow in deep architectures compared to standard LayerNorm.23 For this research, the use of RMSNorm ensures that the 110M and 124M parameter models remain stable during the early phases of pretraining when gradients are most volatile.24
+Architectural Configuration and Parameter Calculation
+Adhering to the specific requirements of the AdiVaani Hiring Assessment, the models must be designed with approximately 110M parameters for the encoder and 124M parameters for the decoder.1 Accurate parameter counting is essential for ensuring the models fit within hardware constraints while maximizing their representational capacity.31
+The 110M Parameter BERT-like Encoder Configuration
+The encoder follows a bidirectional Transformer architecture. To reach the 110M parameter target, the model utilizes a configuration similar to BERT-Base.33
+Component
+	Specification
+	Number of Layers (  )
+	12
+	Hidden Dimension (  )
+	768
+	Attention Heads (  )
+	12
+	KV Heads (  )
+	4 (GQA)
+	Intermediate FFN Size
+	3072
+	Vocabulary Size (  )
+	30,522
+	Max Sequence Length
+	512
+	In this configuration, the parameter distribution is dominated by the embedding layer and the Transformer blocks.35 The total parameters are calculated by summing the embedding weights (  M), the self-attention weights per layer (Query, Key, Value, and Output projections), the FFN weights per layer (two linear layers of size   ), and the normalization parameters.37 The removal of Learned Absolute Positional Embeddings in favor of RoPE reduces the parameter count by approximately 0.4M, which is redirected toward the vocabulary or deeper FFN layers.10
+The 124M Parameter GPT-style Decoder Configuration
+The decoder is a causal, unidirectional Transformer. The 124M parameter target aligns with the GPT-2 Small architecture.38
+Component
+	Specification
+	Number of Layers (  )
+	12
+	Hidden Dimension (  )
+	768
+	Attention Heads (  )
+	12
+	KV Heads (  )
+	4 (GQA)
+	Intermediate FFN Size
+	3072
+	Vocabulary Size (  )
+	50,257
+	Max Sequence Length
+	1024
+	The larger vocabulary size in GPT-style models significantly increases the embedding layer's parameter count (  M).37 To maintain the 124M target, weight tying is frequently employed, where the input embedding matrix and the final output projection matrix share the same parameters.7 This technique not only reduces the model size by nearly 40M parameters but also acts as a regularizer, forcing the model to learn more generalizable token representations.7
+Pretraining Methodology: Designing the MLM and CLM Pipelines
+The effectiveness of neural machine translation is heavily dependent on the quality of the pretrained representations. This project requires training the models from scratch on monolingual and parallel corpora.1
+Masked Language Modeling (MLM) for the Encoder
+The encoder is trained using a Masked Language Modeling objective, which forces the model to understand the bidirectional context of a sentence.42 For this research, the Next Sentence Prediction (NSP) objective is explicitly removed, as modern studies have shown that training on single long sequences leads to better downstream performance on most tasks.42
+The MLM pipeline is designed with the following selection policy:
+1. Selection: 15% of tokens in the input sequence are chosen for masking.42
+2. Replacement: 80% of selected tokens are replaced with a special `` token, 10% are replaced with a random token from the vocabulary, and 10% remain unchanged.42
+3. Dynamic Masking: To prevent the model from memorizing specific mask patterns, the masking is generated on-the-fly for every training iteration.42
+4. Whole Word and Span Masking: Given the rich morphology of Marathi and Hindi, masking individual subwords can lead to "leakage," where the model predicts a suffix based on a visible stem.48 Implementing whole-word masking (masking all subword units of a single word) or span masking (masking contiguous spans of tokens) increases the difficulty of the task and encourages the model to rely on higher-level syntactic and semantic cues.44
+Causal Language Modeling (CLM) for the Decoder
+The GPT-style decoder is trained using a Causal Language Modeling objective, where the model predicts the next token in a sequence given the previous context.50 This is implemented using a causal mask that prevents tokens from attending to future positions.6 The loss function is the standard cross-entropy between the predicted logit distribution and the actual next token.51
+For Hindi-to-Marathi translation, the decoder must be pretrained on high-quality Marathi text to ensure that the generated output is fluent and grammatically correct.53 The use of the "Three-Phase Transformer" structural prior may be considered, which partitions the hidden vector into cyclic channels to maintain phase-respecting operations, though the assessment requirements prioritize GQA and RoPE.29
+Solving the Sequence-to-Sequence Translation Challenge
+After pretraining the encoder and decoder components independently, the core challenge involves integrating them into a unified machine translation framework.
+Integration through Cross-Attention Initialization
+The most principled methodology for combining a BERT-like encoder and a GPT-style decoder is through a "warm-started" encoder-decoder framework.55 However, a standard GPT decoder does not contain the cross-attention layers required to receive information from the encoder.3
+Implementation steps for the translation bridge:
+1. Augmenting the Decoder: Each block of the GPT-style decoder must be modified to include a cross-attention sublayer between the self-attention and FFN sublayers.56
+2. Random Initialization: Since the pretrained GPT weights do not include cross-attention, these new layers are initialized randomly.57
+3. Bridge Dynamics: In cross-attention, the Queries (  ) are derived from the decoder's self-attention output, while the Keys (  ) and Values (  ) are derived from the encoder's final hidden states.3 This allows the decoder to "look back" at the Hindi source sentence while generating the Marathi target sentence.
+The Problem of Representational Compatibility
+A critical failure case in combining independently pretrained models is representational mismatch.60 If the BERT encoder learns a semantic space that is fundamentally different in scale or distribution from the GPT decoder, the cross-attention layers may fail to converge.62 To mitigate this, a "Dynamic Switching Gate" or a small intermediate Feed-Forward Network (adapter) can be placed between the encoder and decoder to map the representations into a compatible space.62
+Furthermore, "Asymptotic Distillation" can be employed during the initial phase of translation training.60 This involves an auxiliary loss that penalizes the model if its internal representations drift too far from the original pretrained checkpoints, ensuring that the "knowledge" acquired during pretraining is preserved while the model learns to translate.63
+Linguistic Modeling for Hindi and Marathi
+Hindi and Marathi are Indo-Aryan languages that share the Devanagari script and exhibit significant morphological and syntactic overlap.13 However, they possess distinct case systems, gender agreement rules, and verbal paradigms that the model must generalize across.
+Tokenization Strategy: SentencePiece vs. BPE
+For these languages, tokenization is the foundation of effective representation.64 While Byte-Pair Encoding (BPE) is standard for English, SentencePiece is widely considered superior for morphologically rich Indian languages.66
+
+
+Strategy
+	Language Adaptation
+	Morphological Handling
+	BPE
+	Relies on whitespace; can fail on complex scripts.64
+	Often breaks words at frequent but non-linguistic character pairs.65
+	SentencePiece
+	Treats text as raw Unicode; script-agnostic.64
+	Better preservation of grammatical roots and suffixes.65
+	Utilizing a shared vocabulary for Hindi and Marathi is highly recommended.14 Given that nearly 40% of their subword units are identical in a joint tokenization model, a shared vocabulary allows the encoder to learn features that are directly useful for the decoder, effectively "transferring" the high-resource knowledge of Hindi to the relatively lower-resource context of Marathi.14
+Data Preparation and Preprocessing
+The Hindi-Marathi parallel corpus provided for the assignment must be filtered for misalignments, which are common in crawled datasets like Samanantar or OPUS.21 Preprocessing should include Unicode NFKC normalization and the removal of noise.69 Sampling a representative subset of the data is permissible, but ensuring linguistic diversity (e.g., news, legal, and colloquial text) is essential for the model's generalization capabilities.53
+Optimization Challenges and Training Dynamics
+Pretraining 110M+ parameter models from scratch requires sophisticated optimization to avoid training instability and ensure efficient convergence.
+Hyperparameter Selection and Stability
+The use of the AdamW optimizer with a cosine learning rate schedule is the current industry standard.15 A warmup phase (e.g., 2000 steps) is critical to allow the randomly initialized layers to adjust before applying high learning rates to the pretrained weights.15
+
+
+Hyperparameter
+	Recommended Value
+	Reasoning
+	Peak Learning Rate
+	  
+ to   
+	Higher rates accelerate early convergence but can lead to loss spikes.7
+	Weight Decay
+	0.01 to 0.1
+	Prevents the model from overfitting to frequent n-grams in the training corpus.7
+	Gradient Clipping
+	1.0
+	Essential for preventing "exploding gradients" in the Transformer stack.73
+	Label Smoothing
+	0.1
+	Regularizes the decoder's predictions, preventing overconfidence.1
+	Hardware Utilization and Mixed Precision
+The assignment requires the efficient use of available GPU resources.1 Training 100M+ parameter models is memory-intensive; therefore, Mixed Precision (FP16 or BF16) should be enabled.17 BF16 is particularly advantageous as it offers the same dynamic range as FP32, significantly reducing the risk of overflow during the training of deep architectures like the 12-layer Transformer.10
+Distributed Data Parallel (DDP) is the preferred framework for multi-GPU setups.17 Unlike Fully Sharded Data Parallel (FSDP), DDP is more efficient for models of this scale (under 1B parameters), as the entire model fits within a single GPU's VRAM, avoiding unnecessary communication overhead.17
+Failure Analysis and Critical Reasoning
+In a research-oriented assessment, identifying why a model fails is as important as its success. Several potential failure modes must be monitored.
+Logit Explosion and Softmax Saturation
+A common issue in training modernized Transformers is the drift of query and key norms, which causes attention scores to explode.10 When    reaches high values, the softmax function becomes extremely "sharp," assigning a probability of 1.0 to a single token.10 This results in zero gradients for all other tokens, effectively halting the learning process.10 This "logit chasing" is mitigated by the scale-anchoring properties of RMSNorm and the use of QK-Normalization or proper scaling by   .24
+Catastrophic Forgetting and Mismatch
+When the decoder is fine-tuned for translation, there is a risk that it will "forget" the fluent Marathi language modeling learned during pretraining and instead produce "translationese"—text that follows Hindi syntax but uses Marathi words.60 This is analyzed by comparing the validation loss of the translation model against a baseline Marathi language model. If the translation model's perplexity on target Marathi text is significantly higher than the LM baseline, it indicates a failure to leverage the pretrained representations.60
+Subword Segmentation Artifacts
+If the SentencePiece vocabulary is too small, common Marathi inflections may be broken into many meaningless characters, causing the model to struggle with long-range morphological dependencies.21 Conversely, a vocabulary that is too large may result in "sparse" embeddings where many tokens are rarely updated, leading to poor generalization for rare words.21 The optimal "Goldilocks" zone for these languages is typically found between 32k and 50k tokens.21
+Performance Evaluation and Metrics
+The final system must be evaluated using quantitative and qualitative measures.1
+   1. Quantitative Metrics:
+   * BLEU (Bilingual Evaluation Understudy): Measures the overlap of n-grams between the generated translation and the reference.67 Results should be reported on a 0-100 scale.1
+   * CHRF++: A character-level F-score that is particularly effective for morphologically rich languages like Marathi, as it captures subword-level correctness even when the exact word form is slightly off.67
+   2. Qualitative Analysis:
+   * Example translations should be examined to identify if the model correctly handles gender agreement (e.g., "Hindi: वह जाता है" vs. "Marathi: तो जातो") and case marking (e.g., ergative 'ne' in Hindi vs. Marathi equivalents).14
+   3. Visualization:
+   * Train/Validation Loss plots should be analyzed for signs of overfitting or divergence.1
+   * BLEU-100 and CHRF++-100 plots provide a direct view of the model's learning trajectory on the translation task.1
+Future Improvements and Scalability
+While the current research focuses on a 110M/124M parameter configuration, the architectural choices (RoPE, GQA, RMSNorm) are designed for scalability.10 Future iterations could explore:
+   * Larger Models: Scaling to 1B+ parameters using the same backbone.15
+   * Advanced Masking: Implementing SpanBERT-style span-boundary objectives to better capture Marathi's complex verbal clusters.44
+   * Multimodal Integration: Leveraging the AdiVaani Initiative's broader focus on indigenous languages by integrating speech-to-text features via cross-modal adapters.51
+The proposed framework represents a rigorous, theoretically grounded approach to solving the Hindi-Marathi translation problem. By synthesizing bidirectional contextual understanding with autoregressive generation efficiency, and utilizing modern architectural optimizations, the resulting system is poised to deliver high-quality, linguistically nuanced translations while remaining computationally efficient and stable. This deep architectural synthesis not only meets the requirements of the assessment but also establishes a foundation for ongoing research in low-resource Indic NLP.
+Works cited
+   1. Adivaani_Hiring_Assignment.pdf
+   2. Attention Is All You Need: Paper to Practice, accessed May 15, 2026, https://algo.monster/courses/llm/attention_paper_comparison
+   3. Encoders and Decoders in Transformer Models - MachineLearningMastery.com, accessed May 15, 2026, https://machinelearningmastery.com/encoders-and-decoders-in-transformer-models/
+   4. The Secret Sauce of Context Windows: Unpacking Rotary Positional Encoding (RoPE) | by Kyouma45 | Data Science Collective | Apr, 2026 | Medium, accessed May 15, 2026, https://medium.com/data-science-collective/the-secret-sauce-of-context-windows-unpacking-rotary-positional-encoding-rope-170436ed01d5
+   5. Positional Embeddings in Transformers: A Math Guide to RoPE & ALiBi, accessed May 15, 2026, https://towardsdatascience.com/positional-embeddings-in-transformers-a-math-guide-to-rope-alibi/
+   6. RoPE (Rotary Position Embeddings): A Detailed Example - Towards AI, accessed May 15, 2026, https://towardsai.net/p/machine-learning/rope-rotary-position-embeddings-a-detailed-example
+   7. Notes on Implementing GPT-2 from scratch | gpt2-sai – Weights & Biases - Wandb, accessed May 15, 2026, https://wandb.ai/training-transformers-vast/gpt2-sai/reports/Notes-on-Implementing-GPT-2-from-scratch---VmlldzoxMjE4Nzg4NA
+   8. Efficient Implementation of Rotary Positional Embedding - Yi Wang, accessed May 15, 2026, https://wangkuiyi.github.io/rope.html
+   9. Math Behind RoPE (Rotary Position Embedding) - Outcome School, accessed May 15, 2026, https://outcomeschool.com/blog/math-behind-rope-rotary-position-embedding
+   10. Modern Transformer Architecture: RoPE, QK Norm, and Design Choices | José David Baena, accessed May 15, 2026, https://josedavidbaena.com/blog/nanochat/modern-transformer-architecture-rope-qk-norm
+   11. How Transformers Encode Position: PE & RoPE Made Simple | by Hugo Le Picard, PhD, accessed May 15, 2026, https://medium.com/@lepicardhugo/how-transformers-encode-position-pe-rope-made-simple-024d5e03fa03
+   12. Rewiring Attention with RoPE : The New Spin on Positional Encodings for Transformers | by ACHINTYA SHARMA | Medium, accessed May 15, 2026, https://medium.com/@sharmaachintya49/rewiring-attention-with-rope-the-new-spin-on-positional-encodings-for-transformers-2fb8e94adca0
+   13. Investigating Lexical Sharing in Multilingual Machine Translation for Indian Languages - ACL Anthology, accessed May 15, 2026, https://aclanthology.org/2023.eamt-1.18.pdf
+   14. Subword-based Cross-lingual Transfer of Embeddings from Hindi to Marathi and Nepali - ACL Anthology, accessed May 15, 2026, https://aclanthology.org/2022.sigmorphon-1.7.pdf
+   15. Grouped-Query Attention (GQA) - rasbt/LLMs-from-scratch - GitHub, accessed May 15, 2026, https://github.com/rasbt/LLMs-from-scratch/blob/main/ch04/04_gqa/README.md
+   16. Grouped Query Attention (GQA) vs. Multi Head Attention (MHA): LLM Inference Serving Acceleration - FriendliAI, accessed May 15, 2026, https://friendli.ai/blog/gqa-vs-mha
+   17. Modernizing nanoGPT: A Deep Dive into GQA, RoPE, and SwiGLU | by Pramodkumarssarvi, accessed May 15, 2026, https://medium.com/@pramodkumarssarvi/modernizing-nanogpt-a-deep-dive-into-gqa-rope-and-swiglu-c180ce0493c9
+   18. Grouped-Query Attention Overview - Emergent Mind, accessed May 15, 2026, https://www.emergentmind.com/topics/group-query-attention-gqa
+   19. Grouped-Query Attention (GQA) | Sebastian Raschka, PhD, accessed May 15, 2026, https://sebastianraschka.com/llms-from-scratch/ch04/04_gqa/
+   20. Grouped Query Attention (GQA) explained with code | by Max Shap - Medium, accessed May 15, 2026, https://medium.com/@maxshapp/grouped-query-attention-gqa-explained-with-code-e56ee2a1df5a
+   21. How to choose a best voc size? - Research - OpenNMT, accessed May 15, 2026, https://forum.opennmt.net/t/how-to-choose-a-best-voc-size/4617
+   22. How to pick the right vocabulary size for sentencepiece tokenization? - Reddit, accessed May 15, 2026, https://www.reddit.com/r/machinetranslation/comments/1jhjnoq/how_to_pick_the_right_vocabulary_size_for/
+   23. Why do many modern LLMs use RMSNorm instead of LayerNorm? - Sebastian Raschka, accessed May 15, 2026, https://sebastianraschka.com/faq/docs/rmsnorm-vs-layernorm.html
+   24. Gated Removal of Normalization in Transformers Enables Stable Training and Efficient Inference - arXiv, accessed May 15, 2026, https://arxiv.org/html/2602.10408v1
+   25. Rohit Bandaru | Transformer Design Guide (Part 2: Modern Architecture), accessed May 15, 2026, https://rohitbandaru.github.io/blog/Transformer-Design-Guide-Pt2/
+   26. Why Modern Transformers Use RMSNorm Instead of LayerNorm | by ..., accessed May 15, 2026, https://medium.com/@ashutoshs81127/why-modern-transformers-use-rmsnorm-instead-of-layernorm-5f386be7156c
+   27. How LLM architecture has evolved from GPT-2 to gpt-oss - Modal, accessed May 15, 2026, https://modal.com/blog/gpt-oss-arch
+   28. HybridNorm: Towards Stable and Efficient Transformer Training via Hybrid Normalization - OpenReview, accessed May 15, 2026, https://openreview.net/pdf/1568823b53afd29707202c88a83bc13bce1b4f8b.pdf
+   29. 1 Introduction - arXiv, accessed May 15, 2026, https://arxiv.org/html/2604.14430v1
+   30. vishsangale/gpt-2: Training GPT-2 from scratch - GitHub, accessed May 15, 2026, https://github.com/vishsangale/gpt-2
+   31. Parameter Counting and Model Sizes | The AI Agent Factory - Panaversity, accessed May 15, 2026, https://agentfactory.panaversity.org/docs/Turing-LLMOps-Proprietary-Intelligence/llm-architecture-compute/parameter-counting
+   32. How to count the Transformer's number of parameters? | by Issa Hammoud - Medium, accessed May 15, 2026, https://medium.com/@intuitivedl/how-to-count-the-transformers-number-of-parameters-d34a2558e26f
+   33. BERT (language model) - Wikipedia, accessed May 15, 2026, https://en.wikipedia.org/wiki/BERT_(language_model)
+   34. BERT Transformers – How Do They Work? | Exxact Blog, accessed May 15, 2026, https://www.exxactcorp.com/blog/Deep-Learning/how-do-bert-transformers-work
+   35. How is the number of parameters be calculated in BERT model? - Stack Overflow, accessed May 15, 2026, https://stackoverflow.com/questions/64485777/how-is-the-number-of-parameters-be-calculated-in-bert-model
+   36. How to Estimate the Number of Parameters in Transformer models - Towards Data Science, accessed May 15, 2026, https://towardsdatascience.com/how-to-estimate-the-number-of-parameters-in-transformer-models-ca0f57d8dff0/
+   37. Transformer Math (Part 1) - Counting Model Parameters - Michael Wornow, accessed May 15, 2026, https://michaelwornow.net/2024/01/18/counting-params-in-transformer
+   38. Pretraining a 124-M Parameter GPT-2 Language Model | lm-finetuning - Wandb, accessed May 15, 2026, https://wandb.ai/bkkaggle/lm-finetuning/reports/Pretraining-a-124-M-Parameter-GPT-2-Language-Model--VmlldzoyMjg4NzA
+   39. Building a 124M GPT-2 Model Using Multiple GPUs in AWS SageMaker - Medium, accessed May 15, 2026, https://medium.com/@govindarajpriyanthan/building-a-124m-gpt-2-model-using-multiple-gpus-in-aws-sagemaker-41e5401ac4f8
+   40. Understanding LLM Parameters: A Step-by-Step Calculation Guide Using GPT-2 - Medium, accessed May 15, 2026, https://medium.com/@tell2jyoti/understanding-llm-parameters-a-step-by-step-calculation-guide-using-gpt-2-2bf6374c5471
+   41. LLMs-from-scratch/ch04/01_main-chapter-code/exercise-solutions.ipynb at main - GitHub, accessed May 15, 2026, https://github.com/rasbt/LLMs-from-scratch/blob/main/ch04/01_main-chapter-code/exercise-solutions.ipynb
+   42. BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding, accessed May 15, 2026, https://blog.paperspace.com/bert-pre-training-of-deep-bidirectional-transformers-for-language-understanding/
+   43. How does BERT use self-supervised learning for NLP tasks? - Milvus, accessed May 15, 2026, https://milvus.io/ai-quick-reference/how-does-bert-use-selfsupervised-learning-for-nlp-tasks
+   44. arXiv:1907.10529v3 [cs.CL] 18 Jan 2020, accessed May 15, 2026, https://arxiv.org/pdf/1907.10529
+   45. Pre-trained Language Models for the Legal Domain: A Case Study on Indian Law - arXiv, accessed May 15, 2026, https://arxiv.org/pdf/2209.06049
+   46. A Complete Guide to BERT with Code | Towards Data Science, accessed May 15, 2026, https://towardsdatascience.com/a-complete-guide-to-bert-with-code-9f87602e4a11/
+   47. Dynamic mask for RoBERTa VS static mask for BERT | by Dr.Tiya Vaj | Medium, accessed May 15, 2026, https://vtiya.medium.com/dynamic-mask-for-roberta-vs-static-mask-for-bert-c997edc9a939
+   48. How important is Whole Word Masking for Masked LM training? - Hugging Face Forums, accessed May 15, 2026, https://discuss.huggingface.co/t/how-important-is-whole-word-masking-for-masked-lm-training/169591
+   49. Mastering Masked Language Models: Techniques, Comparisons, and Best Practices, accessed May 15, 2026, https://medium.com/@atharv6f_47401/mastering-masked-language-models-techniques-comparisons-and-best-practices-33cf061a1693
+   50. Meet GPT, The Decoder-Only Transformer | Towards Data Science, accessed May 15, 2026, https://towardsdatascience.com/meet-gpt-the-decoder-only-transformer-12f4a7918b36/
+   51. How 🤗 Transformers solve tasks - Hugging Face, accessed May 15, 2026, https://huggingface.co/learn/llm-course/chapter1/5
+   52. Let's Code GPT-2 From Scratch - bhaveshpatil.com, accessed May 15, 2026, https://bhaveshpatil.com/posts/gpt2-from-scratch
+   53. MahaBERT: Marathi NLP Transformer - Emergent Mind, accessed May 15, 2026, https://www.emergentmind.com/topics/mahabert
+   54. A Review of the Marathi Natural Language Processing - arXiv, accessed May 15, 2026, https://arxiv.org/pdf/2412.15471
+   55. hfblog/warm-starting-encoder-decoder.md at main · AnswerDotAI ..., accessed May 15, 2026, https://github.com/AnswerDotAI/hfblog/blob/main/warm-starting-encoder-decoder.md
+   56. Encoder-decoders in Transformers: a hybrid pre-trained architecture for seq2seq | by Rémi Louf | HuggingFace | Medium, accessed May 15, 2026, https://medium.com/huggingface/encoder-decoders-in-transformers-a-hybrid-pre-trained-architecture-for-seq2seq-af4d7bf14bb8
+   57. Trying to add support for GPT2 as decoder in EncoderDecoder model #4483 - GitHub, accessed May 15, 2026, https://github.com/huggingface/transformers/issues/4483
+   58. Warm-started encoder-decoder models (Bert2Gpt2 and Bert2Bert) - Hugging Face Forums, accessed May 15, 2026, https://discuss.huggingface.co/t/warm-started-encoder-decoder-models-bert2gpt2-and-bert2bert/12728
+   59. Cross Attention in Transformer - by Sachin Soni - Medium, accessed May 15, 2026, https://medium.com/@sachinsoni600517/cross-attention-in-transformer-f37ce7129d78
+   60. Integrating Pre-trained Language Model into Neural Machine Translation - arXiv, accessed May 15, 2026, https://arxiv.org/html/2310.19680v4
+   61. Extending Encoder Decoder to GPT-2 · Issue #4961 · huggingface/transformers - GitHub, accessed May 15, 2026, https://github.com/huggingface/transformers/issues/4961
+   62. Reusing Monolingual Pre-Trained Models by Cross-Connecting Seq2seq Models for Machine Translation - MDPI, accessed May 15, 2026, https://www.mdpi.com/2076-3417/11/18/8737
+   63. Towards Making the Most of BERT in Neural Machine Translation - AAAI Publications, accessed May 15, 2026, https://ojs.aaai.org/index.php/AAAI/article/view/6479/6335
+   64. LLM Tokenizers Simplified: BPE, SentencePiece, and More | DigitalOcean, accessed May 15, 2026, https://www.digitalocean.com/community/conceptual-articles/llm-tokenizers-bpe-sentencepiece-custom-vs-pretrained
+   65. BPE vs WordPiece vs SentencePiece: A Beginner-Friendly Guide to Subword Tokenization | by Dhiya Adli | Medium, accessed May 15, 2026, https://medium.com/@dhiyaadli/bpe-vs-wordpiece-vs-sentencepiece-a-beginner-friendly-guide-to-subword-tokenization-8047b39d82e0
+   66. Tokenization Matters: Improving Zero-Shot NER for Indic Languages - arXiv, accessed May 15, 2026, https://arxiv.org/html/2504.16977v1
+   67. Analysis of Tokenization Techniques in the Context of Morphology for Multilingual Inputs - Engineered Science Publisher, accessed May 15, 2026, https://www.espublisher.com/uploads/article_pdf/es2094.pdf
+   68. Tokenization Efficiency in Code-Switched Text: Comparing SentencePiece and Byte-Pair Encoding on Taglish - TechRxiv, accessed May 15, 2026, https://www.techrxiv.org/doi/pdf/10.36227/techrxiv.175756338.86755792
+   69. GitHub - google/sentencepiece: Unsupervised text tokenizer for Neural Network-based text generation., accessed May 15, 2026, https://github.com/google/sentencepiece
+   70. Investigating Lexical Sharing in Multilingual Machine Translation for Indian Languages, accessed May 15, 2026, https://www.researchgate.net/publication/370594105_Investigating_Lexical_Sharing_in_Multilingual_Machine_Translation_for_Indian_Languages
+   71. Scaling Laws for BERT in Low-Resource Settings - ACL Anthology, accessed May 15, 2026, https://aclanthology.org/2023.findings-acl.492.pdf
+   72. Reproducing GPT-2 (124M) from scratch - results & notes : r/LocalLLaMA - Reddit, accessed May 15, 2026, https://www.reddit.com/r/LocalLLaMA/comments/1npbxpw/reproducing_gpt2_124m_from_scratch_results_notes/
+   73. GitHub - dino65-dev/Transformers: Transformers from scratch implemented GQA,RoPE,RMS-Norm and trained on that code, accessed May 15, 2026, https://github.com/dino65-dev/Transformers
+   74. Training with Predefined Configurations — NVIDIA NeMo Framework User Guide, accessed May 15, 2026, https://docs.nvidia.com/nemo-framework/user-guide/24.07/llms/bert/trainingpredefined.html
+   75. A Gentle Introduction to Multi-Head Attention and Grouped-Query Attention - MachineLearningMastery.com, accessed May 15, 2026, https://machinelearningmastery.com/a-gentle-introduction-to-multi-head-attention-and-grouped-query-attention/
+   76. Primers • Bidirectional Encoder Representations from Transformers (BERT) - aman.ai, accessed May 15, 2026, https://aman.ai/primers/ai/bert/
+   77. Prepending or Cross-Attention for Speech-to-Text? An Empirical Comparison - arXiv, accessed May 15, 2026, https://arxiv.org/html/2501.02370v3
