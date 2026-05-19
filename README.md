@@ -2,6 +2,8 @@
 
 This repository contains the Part II implementation for the MISN Lab / AdiVaani hiring assignment: from-scratch Hindi encoder MLM pretraining, Marathi GPT-style CLM pretraining, and warm-started Hindi-to-Marathi translation fine-tuning.
 
+The current codebase is centered on a single strict Part II config, [configs/part2_t4.yaml](configs/part2_t4.yaml), which drives the MLM, CLM, MT, eval, and plot stages.
+
 The Part II models use the required architectural changes throughout:
 
 - Rotary positional embeddings instead of sinusoidal or learned positional embeddings
@@ -41,6 +43,8 @@ mt:
   freeze_pretrained: false
 ```
 
+These checkpoints are loaded automatically by the `mt` stage so the translation model starts from the pretrained encoder and decoder rather than random weights.
+
 Fine-tune the encoder-decoder MT model:
 
 ```bash
@@ -76,12 +80,4 @@ The strict Part II config uses separate tokenizers:
 
 ```bash
 pytest
-```
-
-For a one-step CPU sanity run, use `configs/tiny_cpu.yaml`:
-
-```bash
-python scripts/train.py --config configs/tiny_cpu.yaml --stage mlm
-python scripts/train.py --config configs/tiny_cpu.yaml --stage clm
-python scripts/train.py --config configs/tiny_cpu.yaml --stage mt
 ```

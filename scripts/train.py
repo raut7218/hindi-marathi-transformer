@@ -706,7 +706,14 @@ def main():
     parser.add_argument("--stage", required=True, choices=["mlm", "clm", "mt", "eval", "plot"])
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    config_path = args.config
+    if not os.path.isabs(config_path) and not os.path.exists(config_path):
+        repo_config_path = os.path.join(repo_root, config_path)
+        if os.path.exists(repo_config_path):
+            config_path = repo_config_path
+
+    os.chdir(repo_root)
+    cfg = load_config(config_path)
     cfg.setdefault("evaluation", {})
     set_seed(cfg["training"]["seed"])
 
