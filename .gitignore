@@ -1,0 +1,42 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment files
+.env
+.env.*
+
+# Training outputs and checkpoints
+checkpoints/
+checkpoints_*/
+runs/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Generated tokenizer artifacts
+data/*.model
+data/*.vocab
+data/*_corpus.txt
+
+# Generated metrics and plots
+*.jsonl
+*.csv
+plots/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

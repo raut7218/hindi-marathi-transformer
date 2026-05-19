@@ -2,15 +2,18 @@ import os
 import torch
 
 
-def save_checkpoint(path, model, optimizer, step, scaler=None):
+def save_checkpoint(path, model, optimizer=None, step=0, scaler=None, metadata=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {
         "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
         "step": step,
     }
+    if optimizer is not None:
+        payload["optimizer"] = optimizer.state_dict()
     if scaler is not None:
         payload["scaler"] = scaler.state_dict()
+    if metadata is not None:
+        payload["metadata"] = metadata
     torch.save(payload, path)
 
 

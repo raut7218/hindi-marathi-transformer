@@ -1,21 +1,87 @@
-# Hindi to Marathi Transformer MT
+# AdiVaani Hindi-Marathi Part II Transformer Pipeline
 
-This repo trains a small Transformer encoder-decoder with RoPE, GQA, and RMSNorm on the provided Hindi-Marathi data.
+This repository contains the Part II implementation for the MISN Lab / AdiVaani hiring assignment: from-scratch Hindi encoder MLM pretraining, Marathi GPT-style CLM pretraining, and warm-started Hindi-to-Marathi translation fine-tuning.
 
-## Quick start (Colab)
+The Part II models use the required architectural changes throughout:
 
-1. Install deps:
+- Rotary positional embeddings instead of sinusoidal or learned positional embeddings
+- Grouped Query Attention
+- RMSNorm
+- BERT-like encoder pretraining with MLM only, no NSP
+- GPT-2-style decoder-only CLM pretraining with no cross-attention
 
-```
+## Install
+
+```bash
 pip install -r requirements.txt
 ```
 
-2. Run tokenizer training and a stage:
+`numpy` is pinned below 2 because some current Torch builds emit runtime warnings or fail with NumPy 2.x.
 
-```
-python scripts/train.py --config configs/fast_t4.yaml --stage mlm
-python scripts/train.py --config configs/fast_t4.yaml --stage clm
-python scripts/train.py --config configs/fast_t4.yaml --stage mt
+## Part II Commands
+
+Train the Hindi BERT-like encoder from scratch:
+
+```bash
+python scripts/train.py --config configs/part2_t4.yaml --stage mlm
 ```
 
-Checkpoints are saved under `checkpoints/` by default.
+Train the Marathi GPT-style decoder-only model from scratch:
+
+```bash
+python scripts/train.py --config configs/part2_t4.yaml --stage clm
+```
+
+Set the warm-start checkpoints in `configs/part2_t4.yaml`:
+
+```yaml
+mt:
+  encoder_checkpoint: checkpoints_part2/mlm/encoder_mlm_step500.pt
+  decoder_checkpoint: checkpoints_part2/clm/decoder_clm_step500.pt
+  freeze_pretrained: false
+```
+
+Fine-tune the encoder-decoder MT model:
+
+```bash
+python scripts/train.py --config configs/part2_t4.yaml --stage mt
+```
+
+Evaluate a saved MT checkpoint by setting `evaluation.checkpoint`, then running:
+
+```bash
+python scripts/train.py --config configs/part2_t4.yaml --stage eval
+```
+
+Generate the required plots:
+
+```bash
+python scripts/train.py --config configs/part2_t4.yaml --stage plot
+```
+
+Plots are written to `checkpoints_part2/plots/`:
+
+- `loss.png`
+- `bleu_100.png`
+- `chrfpp_100.png`
+
+## Parameter Targets
+
+The strict Part II config uses separate tokenizers:
+
+- Hindi encoder: vocab 45,000, 12 layers, hidden 768, 12 query heads, 4 KV heads, FFN 3072, about 110.08M parameters.
+- Marathi decoder: vocab 50,257, 12 layers, hidden 768, 12 query heads, 4 KV heads, FFN 3584, about 123.55M parameters.
+
+## Smoke Tests
+
+```bash
+pytest
+```
+
+For a one-step CPU sanity run, use `configs/tiny_cpu.yaml`:
+
+```bash
+python scripts/train.py --config configs/tiny_cpu.yaml --stage mlm
+python scripts/train.py --config configs/tiny_cpu.yaml --stage clm
+python scripts/train.py --config configs/tiny_cpu.yaml --stage mt
+```

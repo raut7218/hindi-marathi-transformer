@@ -3,4 +3,6 @@ sentencepiece>=0.1.99
 sacrebleu>=2.4.0
 tqdm>=4.66.0
 pyyaml>=6.0.1
-numpy>=1.24.0
+numpy>=1.24.0,<2
+matplotlib>=3.8.0
+pytest>=8.0.0

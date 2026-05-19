@@ -8,19 +8,19 @@ def make_pad_mask(attn_mask):
     if attn_mask is None:
         return None
     mask = attn_mask.unsqueeze(1).unsqueeze(2)
-    return (1.0 - mask) * -1e9
+    return (1.0 - mask.float()) * -1e4
 
 
 def make_causal_mask(seq_len, device, dtype):
-    mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1)
-    mask = mask * -1e9
-    return mask.to(dtype)
+    mask = torch.full((seq_len, seq_len), 0.0, device=device, dtype=dtype)
+    mask = mask.masked_fill(torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1), -1e4)
+    return mask
 
 
 class FeedForward(nn.Module):
-    def __init__(self, d_model, ffn_mult, dropout):
+    def __init__(self, d_model, ffn_dim, dropout):
         super().__init__()
-        hidden = d_model * ffn_mult
+        hidden = ffn_dim
         self.fc1 = nn.Linear(d_model, hidden, bias=False)
         self.fc2 = nn.Linear(hidden, d_model, bias=False)
         self.dropout = nn.Dropout(dropout)
@@ -31,12 +31,12 @@ class FeedForward(nn.Module):
 
 
 class EncoderBlock(nn.Module):
-    def __init__(self, d_model, n_heads, n_kv_heads, ffn_mult, dropout):
+    def __init__(self, d_model, n_heads, n_kv_heads, ffn_dim, dropout):
         super().__init__()
         self.attn_norm = RMSNorm(d_model)
         self.attn = GQAAttention(d_model, n_heads, n_kv_heads, dropout, use_rope=True)
         self.ffn_norm = RMSNorm(d_model)
-        self.ffn = FeedForward(d_model, ffn_mult, dropout)
+        self.ffn = FeedForward(d_model, ffn_dim, dropout)
 
     def forward(self, x, attn_mask=None):
         h = self.attn(self.attn_norm(x), attn_mask=attn_mask)
@@ -46,15 +46,31 @@ class EncoderBlock(nn.Module):
         return x
 
 
-class DecoderBlock(nn.Module):
-    def __init__(self, d_model, n_heads, n_kv_heads, ffn_mult, dropout):
+class GPTDecoderBlock(nn.Module):
+    def __init__(self, d_model, n_heads, n_kv_heads, ffn_dim, dropout):
+        super().__init__()
+        self.self_norm = RMSNorm(d_model)
+        self.self_attn = GQAAttention(d_model, n_heads, n_kv_heads, dropout, use_rope=True)
+        self.ffn_norm = RMSNorm(d_model)
+        self.ffn = FeedForward(d_model, ffn_dim, dropout)
+
+    def forward(self, x, self_mask=None):
+        h = self.self_attn(self.self_norm(x), attn_mask=self_mask)
+        x = x + h
+        h = self.ffn(self.ffn_norm(x))
+        x = x + h
+        return x
+
+
+class MTDecoderBlock(nn.Module):
+    def __init__(self, d_model, n_heads, n_kv_heads, ffn_dim, dropout):
         super().__init__()
         self.self_norm = RMSNorm(d_model)
         self.self_attn = GQAAttention(d_model, n_heads, n_kv_heads, dropout, use_rope=True)
         self.cross_norm = RMSNorm(d_model)
         self.cross_attn = GQAAttention(d_model, n_heads, n_kv_heads, dropout, use_rope=False)
         self.ffn_norm = RMSNorm(d_model)
-        self.ffn = FeedForward(d_model, ffn_mult, dropout)
+        self.ffn = FeedForward(d_model, ffn_dim, dropout)
 
     def forward(self, x, self_mask=None, enc_out=None, enc_mask=None):
         h = self.self_attn(self.self_norm(x), attn_mask=self_mask)
@@ -68,11 +84,24 @@ class DecoderBlock(nn.Module):
 
 
 class EncoderModel(nn.Module):
-    def __init__(self, vocab_size, d_model, n_layers, n_heads, n_kv_heads, ffn_mult, dropout, max_seq_len):
+    def __init__(
+        self,
+        vocab_size,
+        d_model,
+        n_layers,
+        n_heads,
+        n_kv_heads,
+        ffn_dim=None,
+        dropout=0.1,
+        max_seq_len=512,
+        ffn_mult=None,
+    ):
         super().__init__()
+        if ffn_dim is None:
+            ffn_dim = d_model * (ffn_mult if ffn_mult is not None else 4)
         self.embed = nn.Embedding(vocab_size, d_model)
         self.layers = nn.ModuleList([
-            EncoderBlock(d_model, n_heads, n_kv_heads, ffn_mult, dropout)
+            EncoderBlock(d_model, n_heads, n_kv_heads, ffn_dim, dropout)
             for _ in range(n_layers)
         ])
         self.norm = RMSNorm(d_model)
@@ -97,11 +126,67 @@ class EncoderModel(nn.Module):
 
 
 class DecoderModel(nn.Module):
-    def __init__(self, vocab_size, d_model, n_layers, n_heads, n_kv_heads, ffn_mult, dropout, max_seq_len):
+    def __init__(
+        self,
+        vocab_size,
+        d_model,
+        n_layers,
+        n_heads,
+        n_kv_heads,
+        ffn_dim=None,
+        dropout=0.1,
+        max_seq_len=1024,
+        ffn_mult=None,
+    ):
         super().__init__()
+        if ffn_dim is None:
+            ffn_dim = d_model * (ffn_mult if ffn_mult is not None else 4)
         self.embed = nn.Embedding(vocab_size, d_model)
         self.layers = nn.ModuleList([
-            DecoderBlock(d_model, n_heads, n_kv_heads, ffn_mult, dropout)
+            GPTDecoderBlock(d_model, n_heads, n_kv_heads, ffn_dim, dropout)
+            for _ in range(n_layers)
+        ])
+        self.norm = RMSNorm(d_model)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+        self.max_seq_len = max_seq_len
+        self.tie_weights()
+
+    def tie_weights(self):
+        self.lm_head.weight = self.embed.weight
+
+    def forward(self, input_ids, tgt_mask=None, enc_mask=None, enc_out=None):
+        x = self.embed(input_ids)
+        seq_len = x.size(1)
+        causal = make_causal_mask(seq_len, x.device, x.dtype)
+        causal = causal.unsqueeze(0).unsqueeze(0)
+        pad_mask = make_pad_mask(tgt_mask)
+        if pad_mask is not None:
+            causal = causal + pad_mask
+        for layer in self.layers:
+            x = layer(x, self_mask=causal)
+        x = self.norm(x)
+        return self.lm_head(x)
+
+
+class MTDecoderModel(nn.Module):
+    def __init__(
+        self,
+        vocab_size,
+        d_model,
+        n_layers,
+        n_heads,
+        n_kv_heads,
+        ffn_dim=None,
+        dropout=0.1,
+        max_seq_len=512,
+        ffn_mult=None,
+    ):
+        super().__init__()
+        if ffn_dim is None:
+            ffn_dim = d_model * (ffn_mult if ffn_mult is not None else 4)
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.layers = nn.ModuleList([
+            MTDecoderBlock(d_model, n_heads, n_kv_heads, ffn_dim, dropout)
             for _ in range(n_layers)
         ])
         self.norm = RMSNorm(d_model)
@@ -127,10 +212,51 @@ class DecoderModel(nn.Module):
 
 
 class Seq2SeqModel(nn.Module):
-    def __init__(self, vocab_size, d_model, n_layers, n_heads, n_kv_heads, ffn_mult, dropout, max_seq_len):
+    def __init__(
+        self,
+        vocab_size=None,
+        d_model=768,
+        n_layers=12,
+        n_heads=12,
+        n_kv_heads=4,
+        ffn_dim=None,
+        dropout=0.1,
+        max_seq_len=512,
+        ffn_mult=None,
+        src_vocab_size=None,
+        tgt_vocab_size=None,
+        encoder_config=None,
+        decoder_config=None,
+    ):
         super().__init__()
-        self.encoder = EncoderModel(vocab_size, d_model, n_layers, n_heads, n_kv_heads, ffn_mult, dropout, max_seq_len)
-        self.decoder = DecoderModel(vocab_size, d_model, n_layers, n_heads, n_kv_heads, ffn_mult, dropout, max_seq_len)
+        if encoder_config is None:
+            src_vocab_size = src_vocab_size or vocab_size
+            encoder_config = {
+                "vocab_size": src_vocab_size,
+                "d_model": d_model,
+                "n_layers": n_layers,
+                "n_heads": n_heads,
+                "n_kv_heads": n_kv_heads,
+                "ffn_dim": ffn_dim,
+                "ffn_mult": ffn_mult,
+                "dropout": dropout,
+                "max_seq_len": max_seq_len,
+            }
+        if decoder_config is None:
+            tgt_vocab_size = tgt_vocab_size or vocab_size
+            decoder_config = {
+                "vocab_size": tgt_vocab_size,
+                "d_model": d_model,
+                "n_layers": n_layers,
+                "n_heads": n_heads,
+                "n_kv_heads": n_kv_heads,
+                "ffn_dim": ffn_dim,
+                "ffn_mult": ffn_mult,
+                "dropout": dropout,
+                "max_seq_len": max_seq_len,
+            }
+        self.encoder = EncoderModel(**encoder_config)
+        self.decoder = MTDecoderModel(**decoder_config)
 
     def forward(self, src_ids, src_mask, tgt_in, tgt_mask=None):
         enc_out = self.encoder(src_ids, attn_mask=src_mask)

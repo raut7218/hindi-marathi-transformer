@@ -32,17 +32,18 @@ class MonolingualDataset(Dataset):
 
 
 class ParallelDataset(Dataset):
-    def __init__(self, src_path, tgt_path, tokenizer, max_len):
-        self.tokenizer = tokenizer
+    def __init__(self, src_path, tgt_path, tokenizer, max_len, tgt_tokenizer=None):
+        self.src_tokenizer = tokenizer
+        self.tgt_tokenizer = tgt_tokenizer or tokenizer
         self.max_len = max_len
         self.src_lines = read_lines(src_path)
         self.tgt_lines = read_lines(tgt_path)
         assert len(self.src_lines) == len(self.tgt_lines)
-        self.src_encoded = [self._encode(s) for s in self.src_lines]
-        self.tgt_encoded = [self._encode(t) for t in self.tgt_lines]
+        self.src_encoded = [self._encode(s, self.src_tokenizer) for s in self.src_lines]
+        self.tgt_encoded = [self._encode(t, self.tgt_tokenizer) for t in self.tgt_lines]
 
-    def _encode(self, line):
-        ids = self.tokenizer.encode(line, add_bos=True, add_eos=True)
+    def _encode(self, line, tokenizer):
+        ids = tokenizer.encode(line, add_bos=True, add_eos=True)
         return ids[: self.max_len]
 
     def __len__(self):
@@ -103,16 +104,18 @@ def make_clm_batch(batch, tokenizer):
     return input_ids, attention_mask, labels
 
 
-def make_mt_batch(batch, tokenizer):
-    pad_id = tokenizer.pad_id
+def make_mt_batch(batch, src_tokenizer, tgt_tokenizer=None):
+    tgt_tokenizer = tgt_tokenizer or src_tokenizer
+    src_pad_id = src_tokenizer.pad_id
+    tgt_pad_id = tgt_tokenizer.pad_id
     src, tgt = zip(*batch)
-    src_ids = pad_sequences(src, pad_id)
-    tgt_ids = pad_sequences(tgt, pad_id)
+    src_ids = pad_sequences(src, src_pad_id)
+    tgt_ids = pad_sequences(tgt, tgt_pad_id)
 
     decoder_in = tgt_ids[:, :-1]
     labels = tgt_ids[:, 1:].clone()
-    labels[labels == pad_id] = -100
+    labels[labels == tgt_pad_id] = -100
 
-    src_mask = src_ids.ne(pad_id).long()
-    tgt_mask = decoder_in.ne(pad_id).long()
+    src_mask = src_ids.ne(src_pad_id).long()
+    tgt_mask = decoder_in.ne(tgt_pad_id).long()
     return src_ids, src_mask, decoder_in, tgt_mask, labels

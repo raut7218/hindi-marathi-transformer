@@ -26,6 +26,20 @@ class GQAAttention(nn.Module):
         b, t, _ = x.size()
         return x.view(b, t, n_heads, self.head_dim).transpose(1, 2)
 
+    def _manual_attention(self, q, k, v, attn_mask):
+        if self.n_heads != self.n_kv_heads:
+            repeat = self.n_heads // self.n_kv_heads
+            k = k.repeat_interleave(repeat, dim=1)
+            v = v.repeat_interleave(repeat, dim=1)
+
+        attn_scores = torch.matmul(q, k.transpose(-2, -1))
+        attn_scores = attn_scores / (self.head_dim ** 0.5)
+        if attn_mask is not None:
+            attn_scores = attn_scores + attn_mask
+        attn_probs = F.softmax(attn_scores, dim=-1)
+        attn_probs = self.dropout(attn_probs)
+        return torch.matmul(attn_probs, v)
+
     def forward(self, x, attn_mask=None, kv=None):
         if kv is None:
             kv = x
@@ -36,6 +50,8 @@ class GQAAttention(nn.Module):
         q = self._shape(q, self.n_heads)
         k = self._shape(k, self.n_kv_heads)
         v = self._shape(v, self.n_kv_heads)
+        if attn_mask is not None and attn_mask.dtype != torch.bool:
+            attn_mask = attn_mask.to(dtype=q.dtype)
 
         if self.use_rope:
             cos, sin = self.rope.get_cos_sin(q.size(-2), q.device, q.dtype)
@@ -44,19 +60,19 @@ class GQAAttention(nn.Module):
             q = apply_rope(q, cos, sin)
             k = apply_rope(k, cos, sin)
 
-        if self.n_heads != self.n_kv_heads:
-            repeat = self.n_heads // self.n_kv_heads
-            k = k.repeat_interleave(repeat, dim=1)
-            v = v.repeat_interleave(repeat, dim=1)
-
-        attn_scores = torch.matmul(q, k.transpose(-2, -1))
-        attn_scores = attn_scores / (self.head_dim ** 0.5)
-
-        if attn_mask is not None:
-            attn_scores = attn_scores + attn_mask
-
-        attn_probs = F.softmax(attn_scores, dim=-1)
-        attn_probs = self.dropout(attn_probs)
-        out = torch.matmul(attn_probs, v)
+        dropout_p = self.dropout.p if self.training else 0.0
+        try:
+            out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                enable_gqa=(self.n_heads != self.n_kv_heads),
+            )
+        except TypeError:
+            out = self._manual_attention(q, k, v, attn_mask)
+        except RuntimeError:
+            out = self._manual_attention(q, k, v, attn_mask)
         out = out.transpose(1, 2).contiguous().view(x.size(0), x.size(1), self.d_model)
         return self.out_proj(out)
