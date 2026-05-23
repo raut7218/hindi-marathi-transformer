@@ -54,6 +54,13 @@ training:
   compile: false
   output_dir: checkpoints_part2
 
+distributed:
+  # Multi-GPU distributed training settings
+  # Use with: torchrun --nproc_per_node=2 scripts/train.py --stage mt
+  enabled: true
+  backend: nccl
+  # Note: batch_size parameter remains per-GPU; total_batch = batch_size * num_gpus
+
 evaluation:
   batch_size: 8
   loss_batch_size: 8

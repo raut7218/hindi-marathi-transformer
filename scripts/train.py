@@ -14,7 +14,7 @@ if repo_root not in sys.path:
 import torch
 import torch.nn.functional as F
 import yaml
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, DistributedSampler
 
 from src.data.datasets import (
     MonolingualDataset,
@@ -32,6 +32,17 @@ from src.models.transformer import DecoderModel, EncoderModel, Seq2SeqModel
 from src.utils.checkpoint import load_checkpoint, save_checkpoint
 from src.utils.config import load_config
 from src.utils.decoding import greedy_decode
+from src.utils.distributed import (
+    setup_distributed,
+    cleanup_distributed,
+    is_main_process,
+    get_rank,
+    get_world_size,
+    get_local_rank,
+    synchronize,
+    reduce_loss,
+    get_device as get_distributed_device,
+)
 from src.utils.metrics import compute_bleu_chrf
 from src.utils.params import count_parameters, count_trainable_parameters
 from src.utils.schedule import get_lr
@@ -44,7 +55,8 @@ def set_seed(seed):
 
 
 def get_device():
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Use the distributed device getter if available
+    return get_distributed_device()
 
 
 def get_amp_dtype(name):
@@ -148,16 +160,39 @@ def prepare_tokenizers(cfg):
 
 def make_loader(dataset, cfg, batch_size, shuffle):
     num_workers = cfg["training"].get("num_workers", 0)
-    kwargs = {
-        "batch_size": batch_size,
-        "shuffle": shuffle,
-        "num_workers": num_workers,
-        "collate_fn": lambda x: x,
-        "pin_memory": torch.cuda.is_available(),
-    }
+    world_size = get_world_size()
+    rank = get_rank()
+    
+    # Use DistributedSampler if in distributed mode
+    if world_size > 1:
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=shuffle,
+            seed=cfg["training"].get("seed", 42),
+        )
+        # When using sampler, shuffle must be False in DataLoader
+        kwargs = {
+            "batch_size": batch_size,
+            "sampler": sampler,
+            "num_workers": num_workers,
+            "collate_fn": lambda x: x,
+            "pin_memory": torch.cuda.is_available(),
+        }
+    else:
+        kwargs = {
+            "batch_size": batch_size,
+            "shuffle": shuffle,
+            "num_workers": num_workers,
+            "collate_fn": lambda x: x,
+            "pin_memory": torch.cuda.is_available(),
+        }
+    
     if num_workers > 0:
         kwargs["persistent_workers"] = True
         kwargs["prefetch_factor"] = cfg["training"].get("prefetch_factor", 2)
+    
     return DataLoader(dataset, **kwargs)
 
 
@@ -184,6 +219,11 @@ def maybe_compile(model, cfg, device):
 
 
 def unwrap_model(model):
+    """Unwrap model from DDP or torch.compile wrappers."""
+    # Handle DDP wrapper
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        model = model.module
+    # Handle torch.compile wrapper
     return getattr(model, "_orig_mod", model)
 
 
@@ -383,11 +423,23 @@ def evaluate_mt_metrics(model, dataset, src_tokenizer, tgt_tokenizer, cfg, batch
 
 
 def train_mlm(cfg):
+    # Setup distributed training
+    rank = get_rank()
+    world_size = get_world_size()
+    local_rank = get_local_rank()
     device = get_device()
+    
+    if is_main_process():
+        print(f"[mlm] rank={rank} world_size={world_size} local_rank={local_rank}")
+    
     amp_dtype = get_amp_dtype(cfg["training"].get("amp_dtype", "fp16"))
     out_dir = output_dir(cfg, "mlm")
-    save_run_config(cfg, out_dir)
-    logger = MetricLogger(out_dir, "mlm")
+    
+    # Only save config from rank 0
+    if is_main_process():
+        save_run_config(cfg, out_dir)
+    
+    logger = MetricLogger(out_dir, "mlm") if is_main_process() else None
 
     src_tokenizer, _ = prepare_tokenizers(cfg)
     train_dataset = MonolingualDataset(data_path(cfg, "train", cfg["data"]["src_lang"]), src_tokenizer, model_cfg(cfg, "encoder")["max_seq_len"])
@@ -395,7 +447,13 @@ def train_mlm(cfg):
 
     model = build_encoder(cfg, src_tokenizer).to(device)
     model = maybe_compile(model, cfg, device)
-    print(f"[mlm] params={count_parameters(model)/1e6:.2f}M trainable={count_trainable_parameters(model)/1e6:.2f}M")
+    
+    # Wrap with DDP if in distributed mode
+    if world_size > 1:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+    
+    if is_main_process():
+        print(f"[mlm] params={count_parameters(unwrap_model(model))/1e6:.2f}M trainable={count_trainable_parameters(unwrap_model(model))/1e6:.2f}M")
 
     optimizer = make_optimizer(model, cfg, device)
     scaler = make_scaler(device, amp_dtype)
@@ -406,7 +464,18 @@ def train_mlm(cfg):
         scaler.scale(loss).backward()
         optimizer.zero_grad(set_to_none=True)
 
-    batch_size = auto_tune_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
+    # Auto-tune only on rank 0
+    if is_main_process():
+        batch_size = auto_tune_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
+    else:
+        batch_size = cfg["training"]["batch_size"]
+    
+    # Broadcast batch size to all ranks
+    if world_size > 1:
+        batch_size_tensor = torch.tensor(batch_size, device=device)
+        torch.distributed.broadcast(batch_size_tensor, src=0)
+        batch_size = int(batch_size_tensor.item())
+    
     loader = make_loader(train_dataset, cfg, batch_size, True)
     grad_accum = cfg["training"]["grad_accum_steps"]
     opt_step = 0
@@ -415,6 +484,10 @@ def train_mlm(cfg):
     model.train()
 
     while opt_step < cfg["training"]["max_steps"]:
+        # Set epoch for DistributedSampler
+        if world_size > 1 and hasattr(loader.sampler, "set_epoch"):
+            loader.sampler.set_epoch(opt_step // cfg["training"]["max_steps"])
+        
         for batch in loader:
             if opt_step >= cfg["training"]["max_steps"]:
                 break
@@ -427,9 +500,16 @@ def train_mlm(cfg):
                 continue
             opt_step += 1
             train_step_end(model, optimizer, scaler, cfg)
-            if opt_step % cfg["training"]["log_every"] == 0:
+            
+            # Reduce loss across ranks
+            if world_size > 1:
+                loss_dict = reduce_loss({"loss": last_loss})
+                last_loss = loss_dict["loss"]
+            
+            if opt_step % cfg["training"]["log_every"] == 0 and is_main_process():
                 logger.log(stage="mlm", split="train", step=opt_step, loss=last_loss, lr=lr, batch_size=batch_size)
                 print(f"[mlm] step={opt_step} loss={last_loss:.4f} lr={lr:.2e} bs={batch_size}")
+            
             if opt_step % cfg["training"]["eval_every"] == 0:
                 max_batches = cfg["evaluation"].get("loss_batches", 20)
                 val_loss = evaluate_loss(
@@ -440,23 +520,39 @@ def train_mlm(cfg):
                     lambda m, b, d, a: compute_mlm_loss(m, b, src_tokenizer, d, a),
                     max_batches=max_batches,
                 )
-                logger.log(stage="mlm", split="valid", step=opt_step, loss=val_loss, lr=lr, batch_size=batch_size)
-                print(f"[mlm:valid] step={opt_step} loss={val_loss:.4f}")
-            if opt_step % cfg["training"]["save_every"] == 0:
+                if is_main_process():
+                    logger.log(stage="mlm", split="valid", step=opt_step, loss=val_loss, lr=lr, batch_size=batch_size)
+                    print(f"[mlm:valid] step={opt_step} loss={val_loss:.4f}")
+            
+            if opt_step % cfg["training"]["save_every"] == 0 and is_main_process():
                 ckpt = os.path.join(out_dir, f"encoder_mlm_step{opt_step}.pt")
                 raw_model = unwrap_model(model)
                 save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, src_tokenizer, None, raw_model))
-    raw_model = unwrap_model(model)
-    ckpt = os.path.join(out_dir, f"encoder_mlm_final_step{opt_step}.pt")
-    save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, src_tokenizer, None, raw_model))
+    
+    if is_main_process():
+        raw_model = unwrap_model(model)
+        ckpt = os.path.join(out_dir, f"encoder_mlm_final_step{opt_step}.pt")
+        save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, src_tokenizer, None, raw_model))
 
 
 def train_clm(cfg):
+    # Setup distributed training
+    rank = get_rank()
+    world_size = get_world_size()
+    local_rank = get_local_rank()
     device = get_device()
+    
+    if is_main_process():
+        print(f"[clm] rank={rank} world_size={world_size} local_rank={local_rank}")
+    
     amp_dtype = get_amp_dtype(cfg["training"].get("amp_dtype", "fp16"))
     out_dir = output_dir(cfg, "clm")
-    save_run_config(cfg, out_dir)
-    logger = MetricLogger(out_dir, "clm")
+    
+    # Only save config from rank 0
+    if is_main_process():
+        save_run_config(cfg, out_dir)
+    
+    logger = MetricLogger(out_dir, "clm") if is_main_process() else None
 
     _, tgt_tokenizer = prepare_tokenizers(cfg)
     train_dataset = MonolingualDataset(data_path(cfg, "train", cfg["data"]["tgt_lang"]), tgt_tokenizer, model_cfg(cfg, "decoder")["max_seq_len"])
@@ -464,7 +560,13 @@ def train_clm(cfg):
 
     model = build_decoder(cfg, tgt_tokenizer).to(device)
     model = maybe_compile(model, cfg, device)
-    print(f"[clm] params={count_parameters(model)/1e6:.2f}M trainable={count_trainable_parameters(model)/1e6:.2f}M")
+    
+    # Wrap with DDP if in distributed mode
+    if world_size > 1:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+    
+    if is_main_process():
+        print(f"[clm] params={count_parameters(unwrap_model(model))/1e6:.2f}M trainable={count_trainable_parameters(unwrap_model(model))/1e6:.2f}M")
 
     optimizer = make_optimizer(model, cfg, device)
     scaler = make_scaler(device, amp_dtype)
@@ -475,7 +577,18 @@ def train_clm(cfg):
         scaler.scale(loss).backward()
         optimizer.zero_grad(set_to_none=True)
 
-    batch_size = auto_tune_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
+    # Auto-tune only on rank 0
+    if is_main_process():
+        batch_size = auto_tune_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
+    else:
+        batch_size = cfg["training"]["batch_size"]
+    
+    # Broadcast batch size to all ranks
+    if world_size > 1:
+        batch_size_tensor = torch.tensor(batch_size, device=device)
+        torch.distributed.broadcast(batch_size_tensor, src=0)
+        batch_size = int(batch_size_tensor.item())
+    
     loader = make_loader(train_dataset, cfg, batch_size, True)
     grad_accum = cfg["training"]["grad_accum_steps"]
     opt_step = 0
@@ -484,6 +597,10 @@ def train_clm(cfg):
     model.train()
 
     while opt_step < cfg["training"]["max_steps"]:
+        # Set epoch for DistributedSampler
+        if world_size > 1 and hasattr(loader.sampler, "set_epoch"):
+            loader.sampler.set_epoch(opt_step // cfg["training"]["max_steps"])
+        
         for batch in loader:
             if opt_step >= cfg["training"]["max_steps"]:
                 break
@@ -496,9 +613,16 @@ def train_clm(cfg):
                 continue
             opt_step += 1
             train_step_end(model, optimizer, scaler, cfg)
-            if opt_step % cfg["training"]["log_every"] == 0:
+            
+            # Reduce loss across ranks
+            if world_size > 1:
+                loss_dict = reduce_loss({"loss": last_loss})
+                last_loss = loss_dict["loss"]
+            
+            if opt_step % cfg["training"]["log_every"] == 0 and is_main_process():
                 logger.log(stage="clm", split="train", step=opt_step, loss=last_loss, lr=lr, batch_size=batch_size)
                 print(f"[clm] step={opt_step} loss={last_loss:.4f} lr={lr:.2e} bs={batch_size}")
+            
             if opt_step % cfg["training"]["eval_every"] == 0:
                 val_loss = evaluate_loss(
                     model,
@@ -508,23 +632,39 @@ def train_clm(cfg):
                     lambda m, b, d, a: compute_clm_loss(m, b, tgt_tokenizer, d, a),
                     max_batches=cfg["evaluation"].get("loss_batches", 20),
                 )
-                logger.log(stage="clm", split="valid", step=opt_step, loss=val_loss, lr=lr, batch_size=batch_size)
-                print(f"[clm:valid] step={opt_step} loss={val_loss:.4f}")
-            if opt_step % cfg["training"]["save_every"] == 0:
+                if is_main_process():
+                    logger.log(stage="clm", split="valid", step=opt_step, loss=val_loss, lr=lr, batch_size=batch_size)
+                    print(f"[clm:valid] step={opt_step} loss={val_loss:.4f}")
+            
+            if opt_step % cfg["training"]["save_every"] == 0 and is_main_process():
                 ckpt = os.path.join(out_dir, f"decoder_clm_step{opt_step}.pt")
                 raw_model = unwrap_model(model)
                 save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, None, tgt_tokenizer, raw_model))
-    raw_model = unwrap_model(model)
-    ckpt = os.path.join(out_dir, f"decoder_clm_final_step{opt_step}.pt")
-    save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, None, tgt_tokenizer, raw_model))
+    
+    if is_main_process():
+        raw_model = unwrap_model(model)
+        ckpt = os.path.join(out_dir, f"decoder_clm_final_step{opt_step}.pt")
+        save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, None, tgt_tokenizer, raw_model))
 
 
 def train_mt(cfg):
+    # Setup distributed training
+    rank = get_rank()
+    world_size = get_world_size()
+    local_rank = get_local_rank()
     device = get_device()
+    
+    if is_main_process():
+        print(f"[mt] rank={rank} world_size={world_size} local_rank={local_rank}")
+    
     amp_dtype = get_amp_dtype(cfg["training"].get("amp_dtype", "fp16"))
     out_dir = output_dir(cfg, "mt")
-    save_run_config(cfg, out_dir)
-    logger = MetricLogger(out_dir, "mt")
+    
+    # Only save config from rank 0
+    if is_main_process():
+        save_run_config(cfg, out_dir)
+    
+    logger = MetricLogger(out_dir, "mt") if is_main_process() else None
 
     src_tokenizer, tgt_tokenizer = prepare_tokenizers(cfg)
     train_dataset = ParallelDataset(
@@ -545,7 +685,13 @@ def train_mt(cfg):
     model = build_mt_model(cfg, src_tokenizer, tgt_tokenizer).to(device)
     load_warm_start(cfg, model, device)
     model = maybe_compile(model, cfg, device)
-    print(f"[mt] params={count_parameters(model)/1e6:.2f}M trainable={count_trainable_parameters(model)/1e6:.2f}M")
+    
+    # Wrap with DDP if in distributed mode
+    if world_size > 1:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+    
+    if is_main_process():
+        print(f"[mt] params={count_parameters(unwrap_model(model))/1e6:.2f}M trainable={count_trainable_parameters(unwrap_model(model))/1e6:.2f}M")
 
     optimizer = make_optimizer(model, cfg, device)
     scaler = make_scaler(device, amp_dtype)
@@ -556,7 +702,18 @@ def train_mt(cfg):
         scaler.scale(loss).backward()
         optimizer.zero_grad(set_to_none=True)
 
-    batch_size = auto_tune_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
+    # Auto-tune only on rank 0
+    if is_main_process():
+        batch_size = auto_tune_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
+    else:
+        batch_size = cfg["training"]["batch_size"]
+    
+    # Broadcast batch size to all ranks
+    if world_size > 1:
+        batch_size_tensor = torch.tensor(batch_size, device=device)
+        torch.distributed.broadcast(batch_size_tensor, src=0)
+        batch_size = int(batch_size_tensor.item())
+    
     loader = make_loader(train_dataset, cfg, batch_size, True)
     train_eval_dataset = fixed_subset(train_dataset, cfg["evaluation"].get("sample_train", 128), cfg["training"]["seed"])
     valid_eval_dataset = fixed_subset(valid_dataset, cfg["evaluation"].get("sample_valid", 128), cfg["training"]["seed"] + 1)
@@ -567,6 +724,10 @@ def train_mt(cfg):
     model.train()
 
     while opt_step < cfg["training"]["max_steps"]:
+        # Set epoch for DistributedSampler
+        if world_size > 1 and hasattr(loader.sampler, "set_epoch"):
+            loader.sampler.set_epoch(opt_step // cfg["training"]["max_steps"])
+        
         for batch in loader:
             if opt_step >= cfg["training"]["max_steps"]:
                 break
@@ -579,9 +740,16 @@ def train_mt(cfg):
                 continue
             opt_step += 1
             train_step_end(model, optimizer, scaler, cfg)
-            if opt_step % cfg["training"]["log_every"] == 0:
+            
+            # Reduce loss across ranks
+            if world_size > 1:
+                loss_dict = reduce_loss({"loss": last_loss})
+                last_loss = loss_dict["loss"]
+            
+            if opt_step % cfg["training"]["log_every"] == 0 and is_main_process():
                 logger.log(stage="mt", split="train", step=opt_step, loss=last_loss, lr=lr, batch_size=batch_size)
                 print(f"[mt] step={opt_step} loss={last_loss:.4f} lr={lr:.2e} bs={batch_size}")
+            
             if opt_step % cfg["training"]["eval_every"] == 0:
                 eval_bs = cfg["evaluation"].get("batch_size", 8)
                 train_loss = evaluate_loss(
@@ -602,19 +770,24 @@ def train_mt(cfg):
                 )
                 train_bleu, train_chrf = evaluate_mt_metrics(model, train_eval_dataset, src_tokenizer, tgt_tokenizer, cfg, eval_bs, 0)
                 valid_bleu, valid_chrf = evaluate_mt_metrics(model, valid_eval_dataset, src_tokenizer, tgt_tokenizer, cfg, eval_bs, 0)
-                logger.log(stage="mt", split="train", step=opt_step, loss=train_loss, bleu=train_bleu, chrf=train_chrf, lr=lr, batch_size=batch_size)
-                logger.log(stage="mt", split="valid", step=opt_step, loss=valid_loss, bleu=valid_bleu, chrf=valid_chrf, lr=lr, batch_size=batch_size)
-                print(
-                    f"[mt:eval] step={opt_step} train_loss={train_loss:.4f} valid_loss={valid_loss:.4f} "
-                    f"train_bleu={train_bleu:.2f} valid_bleu={valid_bleu:.2f} valid_chrf={valid_chrf:.2f}"
-                )
-            if opt_step % cfg["training"]["save_every"] == 0:
+                
+                if is_main_process():
+                    logger.log(stage="mt", split="train", step=opt_step, loss=train_loss, bleu=train_bleu, chrf=train_chrf, lr=lr, batch_size=batch_size)
+                    logger.log(stage="mt", split="valid", step=opt_step, loss=valid_loss, bleu=valid_bleu, chrf=valid_chrf, lr=lr, batch_size=batch_size)
+                    print(
+                        f"[mt:eval] step={opt_step} train_loss={train_loss:.4f} valid_loss={valid_loss:.4f} "
+                        f"train_bleu={train_bleu:.2f} valid_bleu={valid_bleu:.2f} valid_chrf={valid_chrf:.2f}"
+                    )
+            
+            if opt_step % cfg["training"]["save_every"] == 0 and is_main_process():
                 ckpt = os.path.join(out_dir, f"mt_step{opt_step}.pt")
                 raw_model = unwrap_model(model)
                 save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, src_tokenizer, tgt_tokenizer, raw_model))
-    raw_model = unwrap_model(model)
-    ckpt = os.path.join(out_dir, f"mt_final_step{opt_step}.pt")
-    save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, src_tokenizer, tgt_tokenizer, raw_model))
+    
+    if is_main_process():
+        raw_model = unwrap_model(model)
+        ckpt = os.path.join(out_dir, f"mt_final_step{opt_step}.pt")
+        save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, src_tokenizer, tgt_tokenizer, raw_model))
 
 
 def checkpoint_metadata(cfg, src_tokenizer, tgt_tokenizer, model):
@@ -704,7 +877,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--stage", required=True, choices=["mlm", "clm", "mt", "eval", "plot"])
+    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training (auto-set by launcher)")
     args = parser.parse_args()
+    
+    # Initialize distributed training if launched with torchrun/torch.distributed.launch
+    if args.local_rank != -1 or "RANK" in os.environ:
+        rank, world_size, local_rank = setup_distributed()
+    else:
+        rank, world_size, local_rank = 0, 1, 0
 
     config_path = args.config
     if not os.path.isabs(config_path) and not os.path.exists(config_path):
@@ -717,16 +897,20 @@ def main():
     cfg.setdefault("evaluation", {})
     set_seed(cfg["training"]["seed"])
 
-    if args.stage == "mlm":
-        train_mlm(cfg)
-    elif args.stage == "clm":
-        train_clm(cfg)
-    elif args.stage == "mt":
-        train_mt(cfg)
-    elif args.stage == "eval":
-        evaluate_mt(cfg)
-    else:
-        plot_metrics(cfg)
+    try:
+        if args.stage == "mlm":
+            train_mlm(cfg)
+        elif args.stage == "clm":
+            train_clm(cfg)
+        elif args.stage == "mt":
+            train_mt(cfg)
+        elif args.stage == "eval":
+            evaluate_mt(cfg)
+        else:
+            plot_metrics(cfg)
+    finally:
+        # Cleanup distributed training
+        cleanup_distributed()
 
 
 if __name__ == "__main__":
