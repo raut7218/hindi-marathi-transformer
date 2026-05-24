@@ -1,7 +1,16 @@
 import torch
 
 
+def _unwrap_model(model):
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        model = model.module
+    if isinstance(model, torch.nn.DataParallel):
+        model = model.module
+    return getattr(model, "_orig_mod", model)
+
+
 def greedy_decode(model, src_ids, src_mask, bos_id, eos_id, max_len, device):
+    model = _unwrap_model(model)
     model.eval()
     with torch.no_grad():
         enc_out = model.encoder(src_ids, src_mask)
