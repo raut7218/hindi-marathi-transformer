@@ -220,6 +220,57 @@ def make_optimizer(model, cfg, device):
     return torch.optim.AdamW(model.parameters(), **kwargs)
 
 
+def stage_lr(cfg, stage):
+    return cfg["training"].get("stage_lrs", {}).get(stage, cfg["training"]["lr"])
+
+
+def make_stage_optimizer(model, cfg, device, stage):
+    old_lr = cfg["training"]["lr"]
+    cfg["training"]["lr"] = stage_lr(cfg, stage)
+    try:
+        return make_optimizer(model, cfg, device)
+    finally:
+        cfg["training"]["lr"] = old_lr
+
+
+def is_cross_attention_param(name):
+    return "cross_" in name
+
+
+def make_mt_optimizer(model, cfg, device):
+    base_lr = stage_lr(cfg, "mt")
+    weight_decay = cfg["training"]["weight_decay"]
+    mt_cfg = cfg.get("mt", {})
+    pretrained_lr_mult = mt_cfg.get("pretrained_lr_mult", 0.3)
+
+    raw_model = unwrap_model(model)
+    cross_params = []
+    pretrained_params = []
+    for name, param in raw_model.named_parameters():
+        if is_cross_attention_param(name):
+            cross_params.append(param)
+        else:
+            pretrained_params.append(param)
+
+    param_groups = []
+    if cross_params:
+        param_groups.append({"params": cross_params, "lr_scale": 1.0, "lr": base_lr, "weight_decay": weight_decay})
+    if pretrained_params:
+        param_groups.append({
+            "params": pretrained_params,
+            "lr_scale": pretrained_lr_mult,
+            "lr": base_lr * pretrained_lr_mult,
+            "weight_decay": weight_decay,
+        })
+
+    if device.type == "cuda":
+        try:
+            return torch.optim.AdamW(param_groups, lr=base_lr, fused=True)
+        except TypeError:
+            pass
+    return torch.optim.AdamW(param_groups, lr=base_lr)
+
+
 def maybe_compile(model, cfg, device):
     if device.type == "cuda" and cfg["training"].get("compile", False):
         try:
@@ -337,17 +388,40 @@ class MetricLogger:
 
 def train_step_end(model, optimizer, scaler, cfg):
     scaler.unscale_(optimizer)
-    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["training"]["grad_clip"])
+    active_params = [
+        param
+        for group in optimizer.param_groups
+        if group.get("lr", 0.0) > 0.0
+        for param in group["params"]
+        if param.grad is not None
+    ]
+    if active_params:
+        torch.nn.utils.clip_grad_norm_(active_params, cfg["training"]["grad_clip"])
     scaler.step(optimizer)
     scaler.update()
     optimizer.zero_grad(set_to_none=True)
 
 
-def set_lr(optimizer, step, cfg):
-    lr = get_lr(step, cfg["training"]["lr"], cfg["training"]["warmup_steps"], cfg["training"]["max_steps"])
+def set_lr(optimizer, step, cfg, stage=None, pretrained_frozen=False):
+    base_lr = stage_lr(cfg, stage) if stage is not None else cfg["training"]["lr"]
+    lr = get_lr(step, base_lr, cfg["training"]["warmup_steps"], cfg["training"]["max_steps"])
     for pg in optimizer.param_groups:
-        pg["lr"] = lr
+        lr_scale = pg.get("lr_scale", 1.0)
+        pg["lr"] = 0.0 if pretrained_frozen and lr_scale != 1.0 else lr * lr_scale
     return lr
+
+
+def backward_context(model, sync_gradients):
+    if sync_gradients or not isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        return nullcontext()
+    return model.no_sync()
+
+
+def average_and_reduce_loss(loss_sum, loss_count, world_size):
+    loss_value = loss_sum / max(1, loss_count)
+    if world_size > 1:
+        loss_value = reduce_loss({"loss": loss_value})["loss"]
+    return loss_value
 
 
 def build_encoder(cfg, tokenizer):
@@ -399,28 +473,45 @@ def load_warm_start(cfg, model, device):
                 param.requires_grad = False
 
 
+def label_smoothing(cfg, stage):
+    value = cfg["training"].get("label_smoothing", 0.0)
+    if isinstance(value, dict):
+        return value.get(stage, 0.0)
+    return value
+
+
 def compute_mlm_loss(model, batch, tokenizer, device, amp_dtype):
     input_ids, attn_mask, labels = make_mlm_batch(batch, tokenizer)
     input_ids, attn_mask, labels = move_to_device([input_ids, attn_mask, labels], device)
     with autocast_context(device, amp_dtype):
-        logits = unwrap_model(model).forward_mlm(input_ids, attn_mask=attn_mask)
+        logits = model(input_ids, attn_mask=attn_mask, return_logits=True)
         return F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=-100)
 
 
-def compute_clm_loss(model, batch, tokenizer, device, amp_dtype):
+def compute_clm_loss(model, batch, tokenizer, cfg, device, amp_dtype):
     input_ids, attn_mask, labels = make_clm_batch(batch, tokenizer)
     input_ids, attn_mask, labels = move_to_device([input_ids, attn_mask, labels], device)
     with autocast_context(device, amp_dtype):
         logits = model(input_ids, tgt_mask=attn_mask)
-        return F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=-100)
+        return F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            labels.reshape(-1),
+            ignore_index=-100,
+            label_smoothing=label_smoothing(cfg, "clm"),
+        )
 
 
-def compute_mt_loss(model, batch, src_tokenizer, tgt_tokenizer, device, amp_dtype):
+def compute_mt_loss(model, batch, src_tokenizer, tgt_tokenizer, cfg, device, amp_dtype):
     src_ids, src_mask, tgt_in, tgt_mask, labels = make_mt_batch(batch, src_tokenizer, tgt_tokenizer)
     src_ids, src_mask, tgt_in, tgt_mask, labels = move_to_device([src_ids, src_mask, tgt_in, tgt_mask, labels], device)
     with autocast_context(device, amp_dtype):
         logits = model(src_ids, src_mask, tgt_in, tgt_mask=tgt_mask)
-        return F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=-100)
+        return F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            labels.reshape(-1),
+            ignore_index=-100,
+            label_smoothing=label_smoothing(cfg, "mt"),
+        )
 
 
 def evaluate_loss(model, dataset, batch_size, cfg, loss_fn, max_batches=None):
@@ -499,7 +590,7 @@ def train_mlm(cfg):
     if is_main_process():
         print(f"[mlm] params={count_parameters(unwrap_model(model))/1e6:.2f}M trainable={count_trainable_parameters(unwrap_model(model))/1e6:.2f}M")
 
-    optimizer = make_optimizer(model, cfg, device)
+    optimizer = make_stage_optimizer(model, cfg, device, "mlm")
     scaler = make_scaler(device, amp_dtype)
     optimizer.zero_grad(set_to_none=True)
 
@@ -515,30 +606,35 @@ def train_mlm(cfg):
     opt_step = 0
     micro_step = 0
     last_loss = 0.0
+    loss_sum = 0.0
+    loss_count = 0
     model.train()
 
+    epoch = 0
     while opt_step < cfg["training"]["max_steps"]:
-        # Set epoch for DistributedSampler
         if world_size > 1 and hasattr(loader.sampler, "set_epoch"):
-            loader.sampler.set_epoch(opt_step // cfg["training"]["max_steps"])
+            loader.sampler.set_epoch(epoch)
+        epoch += 1
         
         for batch in loader:
             if opt_step >= cfg["training"]["max_steps"]:
                 break
-            lr = set_lr(optimizer, opt_step + 1, cfg)
+            sync_gradients = (micro_step + 1) % grad_accum == 0
+            lr = set_lr(optimizer, opt_step + 1, cfg, "mlm")
             loss = compute_mlm_loss(model, batch, src_tokenizer, device, amp_dtype)
-            last_loss = float(loss.item())
-            scaler.scale(loss / grad_accum).backward()
+            loss_sum += float(loss.item())
+            loss_count += 1
+            with backward_context(model, sync_gradients):
+                scaler.scale(loss / grad_accum).backward()
             micro_step += 1
             if micro_step % grad_accum != 0:
                 continue
             opt_step += 1
             train_step_end(model, optimizer, scaler, cfg)
             
-            # Reduce loss across ranks
-            if world_size > 1:
-                loss_dict = reduce_loss({"loss": last_loss})
-                last_loss = loss_dict["loss"]
+            last_loss = average_and_reduce_loss(loss_sum, loss_count, world_size)
+            loss_sum = 0.0
+            loss_count = 0
             
             if opt_step % cfg["training"]["log_every"] == 0 and is_main_process():
                 logger.log(stage="mlm", split="train", step=opt_step, loss=last_loss, lr=lr, batch_size=batch_size)
@@ -598,12 +694,12 @@ def train_clm(cfg):
     if is_main_process():
         print(f"[clm] params={count_parameters(unwrap_model(model))/1e6:.2f}M trainable={count_trainable_parameters(unwrap_model(model))/1e6:.2f}M")
 
-    optimizer = make_optimizer(model, cfg, device)
+    optimizer = make_stage_optimizer(model, cfg, device, "clm")
     scaler = make_scaler(device, amp_dtype)
     optimizer.zero_grad(set_to_none=True)
 
     def tune_step(batch):
-        loss = compute_clm_loss(model, batch, tgt_tokenizer, device, amp_dtype)
+        loss = compute_clm_loss(model, batch, tgt_tokenizer, cfg, device, amp_dtype)
         scaler.scale(loss).backward()
         optimizer.zero_grad(set_to_none=True)
 
@@ -614,30 +710,35 @@ def train_clm(cfg):
     opt_step = 0
     micro_step = 0
     last_loss = 0.0
+    loss_sum = 0.0
+    loss_count = 0
     model.train()
 
+    epoch = 0
     while opt_step < cfg["training"]["max_steps"]:
-        # Set epoch for DistributedSampler
         if world_size > 1 and hasattr(loader.sampler, "set_epoch"):
-            loader.sampler.set_epoch(opt_step // cfg["training"]["max_steps"])
+            loader.sampler.set_epoch(epoch)
+        epoch += 1
         
         for batch in loader:
             if opt_step >= cfg["training"]["max_steps"]:
                 break
-            lr = set_lr(optimizer, opt_step + 1, cfg)
-            loss = compute_clm_loss(model, batch, tgt_tokenizer, device, amp_dtype)
-            last_loss = float(loss.item())
-            scaler.scale(loss / grad_accum).backward()
+            sync_gradients = (micro_step + 1) % grad_accum == 0
+            lr = set_lr(optimizer, opt_step + 1, cfg, "clm")
+            loss = compute_clm_loss(model, batch, tgt_tokenizer, cfg, device, amp_dtype)
+            loss_sum += float(loss.item())
+            loss_count += 1
+            with backward_context(model, sync_gradients):
+                scaler.scale(loss / grad_accum).backward()
             micro_step += 1
             if micro_step % grad_accum != 0:
                 continue
             opt_step += 1
             train_step_end(model, optimizer, scaler, cfg)
             
-            # Reduce loss across ranks
-            if world_size > 1:
-                loss_dict = reduce_loss({"loss": last_loss})
-                last_loss = loss_dict["loss"]
+            last_loss = average_and_reduce_loss(loss_sum, loss_count, world_size)
+            loss_sum = 0.0
+            loss_count = 0
             
             if opt_step % cfg["training"]["log_every"] == 0 and is_main_process():
                 logger.log(stage="clm", split="train", step=opt_step, loss=last_loss, lr=lr, batch_size=batch_size)
@@ -649,7 +750,7 @@ def train_clm(cfg):
                     valid_dataset,
                     cfg["evaluation"].get("loss_batch_size", batch_size),
                     cfg,
-                    lambda m, b, d, a: compute_clm_loss(m, b, tgt_tokenizer, d, a),
+                    lambda m, b, d, a: compute_clm_loss(m, b, tgt_tokenizer, cfg, d, a),
                     max_batches=cfg["evaluation"].get("loss_batches", 20),
                 )
                 if is_main_process():
@@ -709,12 +810,12 @@ def train_mt(cfg):
     if is_main_process():
         print(f"[mt] params={count_parameters(unwrap_model(model))/1e6:.2f}M trainable={count_trainable_parameters(unwrap_model(model))/1e6:.2f}M")
 
-    optimizer = make_optimizer(model, cfg, device)
+    optimizer = make_mt_optimizer(model, cfg, device)
     scaler = make_scaler(device, amp_dtype)
     optimizer.zero_grad(set_to_none=True)
 
     def tune_step(batch):
-        loss = compute_mt_loss(model, batch, src_tokenizer, tgt_tokenizer, device, amp_dtype)
+        loss = compute_mt_loss(model, batch, src_tokenizer, tgt_tokenizer, cfg, device, amp_dtype)
         scaler.scale(loss).backward()
         optimizer.zero_grad(set_to_none=True)
 
@@ -727,30 +828,36 @@ def train_mt(cfg):
     opt_step = 0
     micro_step = 0
     last_loss = 0.0
+    loss_sum = 0.0
+    loss_count = 0
     model.train()
 
+    epoch = 0
     while opt_step < cfg["training"]["max_steps"]:
-        # Set epoch for DistributedSampler
         if world_size > 1 and hasattr(loader.sampler, "set_epoch"):
-            loader.sampler.set_epoch(opt_step // cfg["training"]["max_steps"])
+            loader.sampler.set_epoch(epoch)
+        epoch += 1
         
         for batch in loader:
             if opt_step >= cfg["training"]["max_steps"]:
                 break
-            lr = set_lr(optimizer, opt_step + 1, cfg)
-            loss = compute_mt_loss(model, batch, src_tokenizer, tgt_tokenizer, device, amp_dtype)
-            last_loss = float(loss.item())
-            scaler.scale(loss / grad_accum).backward()
+            sync_gradients = (micro_step + 1) % grad_accum == 0
+            pretrained_frozen = opt_step < cfg.get("mt", {}).get("cross_only_steps", 0)
+            lr = set_lr(optimizer, opt_step + 1, cfg, "mt", pretrained_frozen=pretrained_frozen)
+            loss = compute_mt_loss(model, batch, src_tokenizer, tgt_tokenizer, cfg, device, amp_dtype)
+            loss_sum += float(loss.item())
+            loss_count += 1
+            with backward_context(model, sync_gradients):
+                scaler.scale(loss / grad_accum).backward()
             micro_step += 1
             if micro_step % grad_accum != 0:
                 continue
             opt_step += 1
             train_step_end(model, optimizer, scaler, cfg)
             
-            # Reduce loss across ranks
-            if world_size > 1:
-                loss_dict = reduce_loss({"loss": last_loss})
-                last_loss = loss_dict["loss"]
+            last_loss = average_and_reduce_loss(loss_sum, loss_count, world_size)
+            loss_sum = 0.0
+            loss_count = 0
             
             if opt_step % cfg["training"]["log_every"] == 0 and is_main_process():
                 logger.log(stage="mt", split="train", step=opt_step, loss=last_loss, lr=lr, batch_size=batch_size)
@@ -763,7 +870,7 @@ def train_mt(cfg):
                     train_eval_dataset,
                     cfg["evaluation"].get("loss_batch_size", batch_size),
                     cfg,
-                    lambda m, b, d, a: compute_mt_loss(m, b, src_tokenizer, tgt_tokenizer, d, a),
+                    lambda m, b, d, a: compute_mt_loss(m, b, src_tokenizer, tgt_tokenizer, cfg, d, a),
                     max_batches=cfg["evaluation"].get("loss_batches", 20),
                 )
                 valid_loss = evaluate_loss(
@@ -771,7 +878,7 @@ def train_mt(cfg):
                     valid_eval_dataset,
                     cfg["evaluation"].get("loss_batch_size", batch_size),
                     cfg,
-                    lambda m, b, d, a: compute_mt_loss(m, b, src_tokenizer, tgt_tokenizer, d, a),
+                    lambda m, b, d, a: compute_mt_loss(m, b, src_tokenizer, tgt_tokenizer, cfg, d, a),
                     max_batches=cfg["evaluation"].get("loss_batches", 20),
                 )
                 train_bleu, train_chrf = evaluate_mt_metrics(model, train_eval_dataset, src_tokenizer, tgt_tokenizer, cfg, eval_bs, 0)

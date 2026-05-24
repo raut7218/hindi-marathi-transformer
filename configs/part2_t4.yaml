@@ -43,8 +43,14 @@ training:
   max_steps: 2000
   warmup_steps: 200
   lr: 3.0e-4
+  stage_lrs:
+    mlm: 3.0e-4
+    clm: 3.0e-4
+    mt: 1.0e-4
   weight_decay: 0.01
   grad_clip: 1.0
+  label_smoothing:
+    mt: 0.1
   log_every: 25
   eval_every: 200
   save_every: 500
@@ -74,3 +80,5 @@ mt:
   encoder_checkpoint: checkpoints_part2/mlm/encoder_mlm_final_step2000.pt
   decoder_checkpoint: checkpoints_part2/clm/decoder_clm_final_step2000.pt
   freeze_pretrained: false
+  cross_only_steps: 300
+  pretrained_lr_mult: 0.3

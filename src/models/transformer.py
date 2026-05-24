@@ -112,17 +112,18 @@ class EncoderModel(nn.Module):
     def tie_weights(self):
         self.lm_head.weight = self.embed.weight
 
-    def forward(self, input_ids, attn_mask=None):
+    def forward(self, input_ids, attn_mask=None, return_logits=False):
         x = self.embed(input_ids)
         pad_mask = make_pad_mask(attn_mask)
         for layer in self.layers:
             x = layer(x, attn_mask=pad_mask)
         x = self.norm(x)
+        if return_logits:
+            return self.lm_head(x)
         return x
 
     def forward_mlm(self, input_ids, attn_mask=None):
-        x = self.forward(input_ids, attn_mask=attn_mask)
-        return self.lm_head(x)
+        return self.forward(input_ids, attn_mask=attn_mask, return_logits=True)
 
 
 class DecoderModel(nn.Module):

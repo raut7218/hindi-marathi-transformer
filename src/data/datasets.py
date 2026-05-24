@@ -1,4 +1,3 @@
-import random
 import torch
 from torch.utils.data import Dataset
 
@@ -68,24 +67,17 @@ def make_mlm_batch(batch, tokenizer, mask_prob=0.15):
     input_ids = pad_sequences(batch, pad_id)
     labels = input_ids.clone()
 
-    special_ids = {tokenizer.pad_id, tokenizer.bos_id, tokenizer.eos_id}
+    special_mask = input_ids.eq(tokenizer.pad_id) | input_ids.eq(tokenizer.bos_id) | input_ids.eq(tokenizer.eos_id)
+    mask_positions = torch.rand(input_ids.shape, device=input_ids.device).lt(mask_prob) & ~special_mask
+    labels[~mask_positions] = -100
 
-    for i in range(input_ids.size(0)):
-        for j in range(input_ids.size(1)):
-            token_id = int(input_ids[i, j].item())
-            if token_id in special_ids:
-                labels[i, j] = -100
-                continue
-            if random.random() < mask_prob:
-                r = random.random()
-                if r < 0.8:
-                    input_ids[i, j] = mask_id
-                elif r < 0.9:
-                    input_ids[i, j] = random.randint(0, vocab_size - 1)
-                else:
-                    input_ids[i, j] = token_id
-            else:
-                labels[i, j] = -100
+    replace_probs = torch.rand(input_ids.shape, device=input_ids.device)
+    mask_replace = mask_positions & replace_probs.lt(0.8)
+    random_replace = mask_positions & replace_probs.ge(0.8) & replace_probs.lt(0.9)
+
+    input_ids[mask_replace] = mask_id
+    random_ids = torch.randint(0, vocab_size, input_ids.shape, dtype=input_ids.dtype, device=input_ids.device)
+    input_ids[random_replace] = random_ids[random_replace]
 
     attention_mask = input_ids.ne(pad_id).long()
     return input_ids, attention_mask, labels
