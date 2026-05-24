@@ -632,9 +632,9 @@ python scripts/train.py --config configs/part2_t4.yaml --stage mt
 For Google Colab single-T4 runs, use the Colab config and launcher:
 
 ```bash
-bash scripts/launch_colab.sh train mlm
-bash scripts/launch_colab.sh train clm
-bash scripts/launch_colab.sh train mt
+bash scripts/launch_colab.sh mlm
+bash scripts/launch_colab.sh clm
+bash scripts/launch_colab.sh mt
 ```
 
 For Kaggle or explicit multi-GPU runs:

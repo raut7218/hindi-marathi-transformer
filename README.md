@@ -31,9 +31,9 @@ Use the Colab launcher for a single T4. It runs plain Python, avoids NCCL/DDP, a
 cd /content/hindi-marathi-transformer
 pip install -r requirements.txt
 
-bash scripts/launch_colab.sh train mlm
-bash scripts/launch_colab.sh train clm
-bash scripts/launch_colab.sh train mt
+bash scripts/launch_colab.sh mlm
+bash scripts/launch_colab.sh clm
+bash scripts/launch_colab.sh mt
 ```
 
 Equivalent direct commands:
