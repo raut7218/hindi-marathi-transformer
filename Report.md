@@ -55,12 +55,13 @@ In simple interview language:
 | `src/utils/schedule.py` | Warmup plus cosine learning-rate schedule |
 | `src/utils/metrics.py` | BLEU and chrF++ computation using sacrebleu |
 | `src/utils/decoding.py` | Greedy decoding for evaluation |
-| `src/utils/checkpoint.py` | Save/load checkpoint helpers |
+| `src/utils/checkpoint.py` | Atomic save/load checkpoint helpers |
 | `src/utils/params.py` | Parameter counting helpers |
-| `configs/part2_t4.yaml` | Main strict Part II training configuration |
+| `configs/part2_t4.yaml` | Main strict Part II multi-GPU training configuration |
+| `configs/colab_t4.yaml` | Single-GPU Google Colab T4 configuration |
 | `tests/test_part2.py` | Shape tests, parameter count tests, and plot-generation tests |
 
-The codebase is now organized around this single Part II configuration. The `mt` section in [configs/part2_t4.yaml](configs/part2_t4.yaml) stores the encoder and decoder warm-start checkpoints used by the translation stage, while `freeze_pretrained` controls whether those pretrained weights remain trainable during MT fine-tuning.
+The codebase is organized around strict Part II configurations for both Colab and Kaggle-style runs. The `mt` section stores the encoder and decoder warm-start checkpoints used by the translation stage, while `freeze_pretrained`, `cross_only_steps`, and `pretrained_lr_mult` control how pretrained weights are used during MT fine-tuning.
 
 ## 4. High-Level Architecture
 
@@ -628,16 +629,32 @@ Fine-tune machine translation:
 python scripts/train.py --config configs/part2_t4.yaml --stage mt
 ```
 
+For Google Colab single-T4 runs, use the Colab config and launcher:
+
+```bash
+bash scripts/launch_colab.sh train mlm
+bash scripts/launch_colab.sh train clm
+bash scripts/launch_colab.sh train mt
+```
+
+For Kaggle or explicit multi-GPU runs:
+
+```bash
+GPUS=2 bash scripts/launch_distributed.sh train mlm
+GPUS=2 bash scripts/launch_distributed.sh train clm
+GPUS=2 bash scripts/launch_distributed.sh train mt
+```
+
 Evaluate a checkpoint:
 
 ```bash
-python scripts/train.py --config configs/part2_t4.yaml --stage eval
+python scripts/train.py --config configs/colab_t4.yaml --stage eval
 ```
 
 Generate plots:
 
 ```bash
-python scripts/train.py --config configs/part2_t4.yaml --stage plot
+python scripts/train.py --config configs/colab_t4.yaml --stage plot
 ```
 
 ### 16.2 Training Loop
@@ -657,8 +674,10 @@ Each training stage follows the same pattern:
 11. Train for `max_steps`.
 12. Log metrics.
 13. Periodically evaluate.
-14. Periodically save checkpoint.
+14. Periodically save checkpoint when enabled.
 15. Save final checkpoint.
+
+Checkpoint writes are atomic: the code saves to a temporary file and then replaces the final path. In multi-GPU mode, ranks synchronize around checkpoint saves so non-main ranks do not continue into DDP collectives while rank 0 is writing. The Colab config disables optimizer-state checkpoints by default to reduce file size and avoid notebook storage write failures.
 
 ### 16.3 Optimizer
 
@@ -1191,7 +1210,7 @@ Possible improvement:
 
 ### 27.1 GPU Hardware Used
 
-Training and debugging were run in a Kaggle environment with 2 GPUs available for distributed training. The repository logs capture the multi-GPU setup used for the final MT run.
+Training and debugging support both Google Colab single-T4 execution and Kaggle-style multi-GPU execution. Colab uses `configs/colab_t4.yaml` with single-process CUDA training and model-only checkpoints. Kaggle multi-GPU remains available by explicitly launching with `GPUS=2`.
 
 ### 27.2 LLM Assistance Used
 

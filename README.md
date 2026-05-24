@@ -2,7 +2,10 @@
 
 This repository contains the Part II implementation for the MISN Lab / AdiVaani hiring assignment: from-scratch Hindi encoder MLM pretraining, Marathi GPT-style CLM pretraining, and warm-started Hindi-to-Marathi translation fine-tuning.
 
-The current codebase is centered on a single strict Part II config, [configs/part2_t4.yaml](configs/part2_t4.yaml), which drives the MLM, CLM, MT, eval, and plot stages.
+The codebase now has two ready-to-run configs:
+
+- `configs/colab_t4.yaml`: single Google Colab T4, model-only checkpoints, no DDP.
+- `configs/part2_t4.yaml`: explicit multi-GPU/Kaggle style training.
 
 The Part II models use the required architectural changes throughout:
 
@@ -20,58 +23,71 @@ pip install -r requirements.txt
 
 `numpy` is pinned below 2 because some current Torch builds emit runtime warnings or fail with NumPy 2.x.
 
-## Part II Commands
+## Google Colab Single T4
 
-Train the Hindi BERT-like encoder from scratch:
-
-```bash
-python scripts/train.py --config configs/part2_t4.yaml --stage mlm
-```
-
-Train the Marathi GPT-style decoder-only model from scratch:
+Use the Colab launcher for a single T4. It runs plain Python, avoids NCCL/DDP, and writes smaller model-only checkpoints under `checkpoints_colab/`.
 
 ```bash
-python scripts/train.py --config configs/part2_t4.yaml --stage clm
+cd /content/hindi-marathi-transformer
+pip install -r requirements.txt
+
+bash scripts/launch_colab.sh train mlm
+bash scripts/launch_colab.sh train clm
+bash scripts/launch_colab.sh train mt
 ```
 
-Set the warm-start checkpoints in `configs/part2_t4.yaml`:
+Equivalent direct commands:
+
+```bash
+python scripts/train.py --config configs/colab_t4.yaml --stage mlm
+python scripts/train.py --config configs/colab_t4.yaml --stage clm
+python scripts/train.py --config configs/colab_t4.yaml --stage mt
+```
+
+Evaluate or plot after training:
+
+```bash
+python scripts/train.py --config configs/colab_t4.yaml --stage eval
+python scripts/train.py --config configs/colab_t4.yaml --stage plot
+```
+
+For evaluation, set `evaluation.checkpoint` in `configs/colab_t4.yaml` to a saved MT checkpoint path first.
+
+## Kaggle Or Multi-GPU
+
+Multi-GPU training is still supported, but request it explicitly:
+
+```bash
+GPUS=2 bash scripts/launch_distributed.sh train mlm
+GPUS=2 bash scripts/launch_distributed.sh train clm
+GPUS=2 bash scripts/launch_distributed.sh train mt
+```
+
+Single-GPU through the same launcher:
+
+```bash
+GPUS=1 bash scripts/launch_distributed.sh train mt
+```
+
+## Checkpointing
+
+Checkpoint writes are atomic: the code writes `*.tmp` first and then replaces the final file. This prevents corrupt partial checkpoints after interrupted writes.
+
+The Colab config uses:
 
 ```yaml
-mt:
-  encoder_checkpoint: checkpoints_part2/mlm/encoder_mlm_final_step2000.pt
-  decoder_checkpoint: checkpoints_part2/clm/decoder_clm_final_step2000.pt
-  freeze_pretrained: false
+training:
+  save_every: 0
+  save_optimizer_state: false
+  save_scaler_state: false
+  output_dir: checkpoints_colab
 ```
 
-These checkpoints are loaded automatically by the `mt` stage so the translation model starts from the pretrained encoder and decoder rather than random weights.
-
-Fine-tune the encoder-decoder MT model:
-
-```bash
-python scripts/train.py --config configs/part2_t4.yaml --stage mt
-```
-
-Evaluate a saved MT checkpoint by setting `evaluation.checkpoint`, then running:
-
-```bash
-python scripts/train.py --config configs/part2_t4.yaml --stage eval
-```
-
-Generate the required plots:
-
-```bash
-python scripts/train.py --config configs/part2_t4.yaml --stage plot
-```
-
-Plots are written to `checkpoints_part2/plots/`:
-
-- `loss.png`
-- `bleu_100.png`
-- `chrfpp_100.png`
+That disables large intermediate checkpoints and keeps final checkpoints smaller. Multi-GPU saves synchronize ranks before and after rank 0 writes, so other ranks do not continue into DDP collectives while rank 0 is checkpointing.
 
 ## Parameter Targets
 
-The strict Part II config uses separate tokenizers:
+The strict Part II configs use separate tokenizers:
 
 - Hindi encoder: vocab 45,000, 12 layers, hidden 768, 12 query heads, 4 KV heads, FFN 3072, about 110.08M parameters.
 - Marathi decoder: vocab 50,257, 12 layers, hidden 768, 12 query heads, 4 KV heads, FFN 3584, about 123.55M parameters.

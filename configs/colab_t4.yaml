@@ -53,21 +53,18 @@ training:
     mt: 0.1
   log_every: 25
   eval_every: 200
-  save_every: 500
+  save_every: 0
   save_optimizer_state: false
   save_scaler_state: false
   num_workers: 2
   prefetch_factor: 2
   amp_dtype: fp16
   compile: false
-  output_dir: checkpoints_part2
+  output_dir: checkpoints_colab
 
 distributed:
-  # Multi-GPU distributed training settings
-  # Use with: torchrun --nproc_per_node=2 scripts/train.py --stage mt
-  enabled: true
+  enabled: false
   backend: nccl
-  # Note: batch_size parameter remains per-GPU; total_batch = batch_size * num_gpus
 
 evaluation:
   batch_size: 8
@@ -79,8 +76,8 @@ evaluation:
   checkpoint:
 
 mt:
-  encoder_checkpoint: checkpoints_part2/mlm/encoder_mlm_final_step2000.pt
-  decoder_checkpoint: checkpoints_part2/clm/decoder_clm_final_step2000.pt
+  encoder_checkpoint: checkpoints_colab/mlm/encoder_mlm_final_step2000.pt
+  decoder_checkpoint: checkpoints_colab/clm/decoder_clm_final_step2000.pt
   freeze_pretrained: false
   cross_only_steps: 300
   pretrained_lr_mult: 0.3

@@ -1,11 +1,11 @@
 #!/bin/bash
-# Launch distributed training on multiple GPUs
+# Launch training on one or more GPUs
 # 
 # Usage:
-#   bash scripts/launch_distributed.sh train mt              # Train MT stage on 2 GPUs
-#   bash scripts/launch_distributed.sh train mlm             # Train MLM stage on 2 GPUs
+#   bash scripts/launch_distributed.sh train mt              # Train MT stage on 1 GPU
+#   GPUS=2 bash scripts/launch_distributed.sh train mt       # Train on 2 GPUs
 #   GPUS=4 bash scripts/launch_distributed.sh train mt       # Train on 4 GPUs
-#   GPUS=1 bash scripts/launch_distributed.sh train mt       # Train on 1 GPU (fallback)
+#   CONFIG=configs/colab_t4.yaml bash scripts/launch_distributed.sh train mlm
 
 # Get the absolute directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -13,7 +13,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 TRAIN_SCRIPT="$REPO_ROOT/scripts/train.py"
 
 # Configuration
-GPUS=${GPUS:-2}  # Number of GPUs (default: 2 for Kaggle T4)
+GPUS=${GPUS:-1}  # Default to one GPU for Colab/single-T4 safety.
 CONFIG=${CONFIG:-configs/part2_t4.yaml}
 
 # Parse command-line arguments
@@ -57,7 +57,6 @@ if [ "$GPUS" -gt 1 ]; then
     echo "[launcher] Command: torchrun --nproc_per_node=$GPUS '$TRAIN_SCRIPT' --stage $STAGE --config '$CONFIG' $EXTRA_ARGS"
     torchrun --nproc_per_node="$GPUS" "$TRAIN_SCRIPT" --stage "$STAGE" --config "$CONFIG" $EXTRA_ARGS
 else
-    # Single GPU: fallback to standard training
     echo "[launcher] Starting single GPU training (GPUS=1)"
     echo "[launcher] Repo root: $REPO_ROOT"
     echo "[launcher] Train script: $TRAIN_SCRIPT"

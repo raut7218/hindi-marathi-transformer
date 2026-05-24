@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import torch
+import yaml
 
 repo_root = Path(__file__).resolve().parents[1]
 if str(repo_root) not in sys.path:
@@ -12,6 +13,7 @@ import scripts.train as train_module
 from scripts.train import plot_metrics
 from src.data.datasets import make_mlm_batch
 from src.models.transformer import DecoderModel, EncoderModel, Seq2SeqModel
+from src.utils.checkpoint import load_checkpoint, save_checkpoint
 from src.utils.params import count_parameters
 
 
@@ -267,3 +269,61 @@ def test_stage_lr_and_mt_freeze_lr_scaling():
     assert lr == 1.0e-4
     assert optimizer.param_groups[0]["lr"] == 1.0e-4
     assert optimizer.param_groups[1]["lr"] == 0.0
+
+
+def test_checkpoint_save_is_atomic_and_removes_tmp(tmp_path):
+    model = torch.nn.Linear(2, 2)
+    path = tmp_path / "model.pt"
+
+    save_checkpoint(path, model, step=3)
+
+    assert path.exists()
+    assert not (tmp_path / "model.pt.tmp").exists()
+    payload = torch.load(path, map_location="cpu")
+    assert payload["step"] == 3
+    assert "model" in payload
+
+
+def test_model_only_checkpoint_excludes_optimizer_and_scaler(tmp_path):
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters())
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    path = tmp_path / "model_only.pt"
+
+    save_checkpoint(
+        path,
+        model,
+        optimizer=optimizer,
+        step=5,
+        scaler=scaler,
+        save_optimizer=False,
+        save_scaler=False,
+    )
+
+    payload = torch.load(path, map_location="cpu")
+    assert "optimizer" not in payload
+    assert "scaler" not in payload
+    assert payload["step"] == 5
+
+
+def test_load_checkpoint_supports_full_checkpoint(tmp_path):
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters())
+    path = tmp_path / "full.pt"
+    save_checkpoint(path, model, optimizer=optimizer, step=7)
+
+    loaded_model = torch.nn.Linear(2, 2)
+    loaded_optimizer = torch.optim.AdamW(loaded_model.parameters())
+    step = load_checkpoint(path, loaded_model, optimizer=loaded_optimizer, map_location="cpu")
+
+    assert step == 7
+
+
+def test_colab_config_is_single_gpu_and_model_only():
+    cfg = yaml.safe_load((repo_root / "configs" / "colab_t4.yaml").read_text(encoding="utf-8"))
+
+    assert cfg["distributed"]["enabled"] is False
+    assert cfg["training"]["output_dir"] == "checkpoints_colab"
+    assert cfg["training"]["save_every"] == 0
+    assert cfg["training"]["save_optimizer_state"] is False
+    assert cfg["mt"]["encoder_checkpoint"].startswith("checkpoints_colab/")

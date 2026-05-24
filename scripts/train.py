@@ -109,6 +109,38 @@ def save_run_config(cfg, out_dir):
             yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
 
 
+def save_checkpoint_safely(path, model, optimizer, step, scaler, cfg, metadata=None):
+    world_size = get_world_size()
+    if world_size > 1:
+        synchronize()
+
+    error = None
+    if is_main_process():
+        try:
+            save_checkpoint(
+                path,
+                model,
+                optimizer,
+                step,
+                scaler,
+                metadata=metadata,
+                save_optimizer=cfg["training"].get("save_optimizer_state", True),
+                save_scaler=cfg["training"].get("save_scaler_state", True),
+            )
+        except Exception as exc:
+            error = exc
+
+    if world_size > 1:
+        device = get_device()
+        failed = torch.tensor(1 if error is not None else 0, device=device)
+        torch.distributed.broadcast(failed, src=0)
+        if int(failed.item()) != 0:
+            raise RuntimeError(f"Checkpoint save failed on rank 0: {error or 'see rank 0 logs'}")
+        synchronize()
+    elif error is not None:
+        raise RuntimeError(f"Checkpoint save failed: {error}") from error
+
+
 def data_path(cfg, split, lang):
     return os.path.join(cfg["data"]["data_dir"], f"{split}.{lang}")
 
@@ -654,15 +686,15 @@ def train_mlm(cfg):
                     logger.log(stage="mlm", split="valid", step=opt_step, loss=val_loss, lr=lr, batch_size=batch_size)
                     print(f"[mlm:valid] step={opt_step} loss={val_loss:.4f}")
             
-            if opt_step % cfg["training"]["save_every"] == 0 and is_main_process():
+            save_every = cfg["training"].get("save_every", 0)
+            if save_every > 0 and opt_step % save_every == 0:
                 ckpt = os.path.join(out_dir, f"encoder_mlm_step{opt_step}.pt")
                 raw_model = unwrap_model(model)
-                save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, src_tokenizer, None, raw_model))
+                save_checkpoint_safely(ckpt, raw_model, optimizer, opt_step, scaler, cfg, metadata=checkpoint_metadata(cfg, src_tokenizer, None, raw_model))
     
-    if is_main_process():
-        raw_model = unwrap_model(model)
-        ckpt = os.path.join(out_dir, f"encoder_mlm_final_step{opt_step}.pt")
-        save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, src_tokenizer, None, raw_model))
+    raw_model = unwrap_model(model)
+    ckpt = os.path.join(out_dir, f"encoder_mlm_final_step{opt_step}.pt")
+    save_checkpoint_safely(ckpt, raw_model, optimizer, opt_step, scaler, cfg, metadata=checkpoint_metadata(cfg, src_tokenizer, None, raw_model))
 
 
 def train_clm(cfg):
@@ -757,15 +789,15 @@ def train_clm(cfg):
                     logger.log(stage="clm", split="valid", step=opt_step, loss=val_loss, lr=lr, batch_size=batch_size)
                     print(f"[clm:valid] step={opt_step} loss={val_loss:.4f}")
             
-            if opt_step % cfg["training"]["save_every"] == 0 and is_main_process():
+            save_every = cfg["training"].get("save_every", 0)
+            if save_every > 0 and opt_step % save_every == 0:
                 ckpt = os.path.join(out_dir, f"decoder_clm_step{opt_step}.pt")
                 raw_model = unwrap_model(model)
-                save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, None, tgt_tokenizer, raw_model))
+                save_checkpoint_safely(ckpt, raw_model, optimizer, opt_step, scaler, cfg, metadata=checkpoint_metadata(cfg, None, tgt_tokenizer, raw_model))
     
-    if is_main_process():
-        raw_model = unwrap_model(model)
-        ckpt = os.path.join(out_dir, f"decoder_clm_final_step{opt_step}.pt")
-        save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, None, tgt_tokenizer, raw_model))
+    raw_model = unwrap_model(model)
+    ckpt = os.path.join(out_dir, f"decoder_clm_final_step{opt_step}.pt")
+    save_checkpoint_safely(ckpt, raw_model, optimizer, opt_step, scaler, cfg, metadata=checkpoint_metadata(cfg, None, tgt_tokenizer, raw_model))
 
 
 def train_mt(cfg):
@@ -892,15 +924,15 @@ def train_mt(cfg):
                         f"train_bleu={train_bleu:.2f} valid_bleu={valid_bleu:.2f} valid_chrf={valid_chrf:.2f}"
                     )
             
-            if opt_step % cfg["training"]["save_every"] == 0 and is_main_process():
+            save_every = cfg["training"].get("save_every", 0)
+            if save_every > 0 and opt_step % save_every == 0:
                 ckpt = os.path.join(out_dir, f"mt_step{opt_step}.pt")
                 raw_model = unwrap_model(model)
-                save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, src_tokenizer, tgt_tokenizer, raw_model))
+                save_checkpoint_safely(ckpt, raw_model, optimizer, opt_step, scaler, cfg, metadata=checkpoint_metadata(cfg, src_tokenizer, tgt_tokenizer, raw_model))
     
-    if is_main_process():
-        raw_model = unwrap_model(model)
-        ckpt = os.path.join(out_dir, f"mt_final_step{opt_step}.pt")
-        save_checkpoint(ckpt, raw_model, optimizer, opt_step, scaler, metadata=checkpoint_metadata(cfg, src_tokenizer, tgt_tokenizer, raw_model))
+    raw_model = unwrap_model(model)
+    ckpt = os.path.join(out_dir, f"mt_final_step{opt_step}.pt")
+    save_checkpoint_safely(ckpt, raw_model, optimizer, opt_step, scaler, cfg, metadata=checkpoint_metadata(cfg, src_tokenizer, tgt_tokenizer, raw_model))
 
 
 def checkpoint_metadata(cfg, src_tokenizer, tgt_tokenizer, model):
