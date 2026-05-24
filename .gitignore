@@ -35,6 +35,9 @@ data/*_corpus.txt
 *.csv
 plots/
 
+# Local scratch test file
+/test0.py
+
 # OS / editor noise
 .DS_Store
 Thumbs.db

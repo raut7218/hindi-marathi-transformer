@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 
 
-def setup_distributed():
+def setup_distributed(backend=None):
     """Initialize distributed training environment.
     
     Must be called at the start of each training process when using multi-GPU training.
@@ -22,6 +22,12 @@ def setup_distributed():
     
     # Only initialize if world_size > 1 (multi-GPU mode)
     if world_size > 1:
+        if backend is None:
+            backend = "gloo" if os.name == "nt" else "nccl"
+        backend = backend.lower()
+        if os.name == "nt" and backend == "nccl":
+            backend = "gloo"
+
         # Check if CUDA is available
         if not torch.cuda.is_available():
             raise RuntimeError(
@@ -34,11 +40,11 @@ def setup_distributed():
         
         # Initialize the process group
         dist.init_process_group(
-            backend="nccl",
+            backend=backend,
             rank=rank,
             world_size=world_size,
         )
-        print(f"[distributed] rank={rank} world_size={world_size} local_rank={local_rank} initialized")
+        print(f"[distributed] rank={rank} world_size={world_size} local_rank={local_rank} backend={backend} initialized")
     else:
         print(f"[distributed] single GPU mode (world_size=1)")
     

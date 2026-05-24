@@ -123,38 +123,54 @@ def prepare_tokenizers(cfg):
     data_dir = cfg["data"]["data_dir"]
     src_lang = cfg["data"]["src_lang"]
     tgt_lang = cfg["data"]["tgt_lang"]
+    world_size = get_world_size()
+    main_process = is_main_process()
+
+    # In distributed jobs, rank 0 prepares the tokenizer files once and the
+    # other ranks wait until the files are ready.
+    if world_size > 1 and not main_process:
+        synchronize()
 
     if "tokenizers" not in cfg or cfg.get("tokenizers", {}).get("shared", False):
         tok_cfg = cfg.get("tokenizer", cfg.get("tokenizers", {}).get("shared_config", {}))
-        model_path = train_sentencepiece(
-            data_dir,
-            tok_cfg["model_prefix"],
-            tok_cfg["vocab_size"],
-            tok_cfg["character_coverage"],
-        )
+        model_path = tok_cfg["model_prefix"] + ".model"
+        if main_process:
+            model_path = train_sentencepiece(
+                data_dir,
+                tok_cfg["model_prefix"],
+                tok_cfg["vocab_size"],
+                tok_cfg["character_coverage"],
+            )
+        if world_size > 1:
+            synchronize()
         tokenizer = SentencePieceTokenizer(model_path)
         return tokenizer, tokenizer
 
     src_cfg = tokenizer_section(cfg, "src")
     tgt_cfg = tokenizer_section(cfg, "tgt")
-    src_model = train_sentencepiece_from_files(
-        [data_path(cfg, "train", src_lang)],
-        src_cfg["model_prefix"],
-        src_cfg["vocab_size"],
-        src_cfg["character_coverage"],
-        src_cfg.get("model_type", "unigram"),
-        src_cfg.get("input_sentence_size", 0),
-        src_cfg.get("max_sentence_length", 4192),
-    )
-    tgt_model = train_sentencepiece_from_files(
-        [data_path(cfg, "train", tgt_lang)],
-        tgt_cfg["model_prefix"],
-        tgt_cfg["vocab_size"],
-        tgt_cfg["character_coverage"],
-        tgt_cfg.get("model_type", "unigram"),
-        tgt_cfg.get("input_sentence_size", 0),
-        tgt_cfg.get("max_sentence_length", 4192),
-    )
+    src_model = src_cfg["model_prefix"] + ".model"
+    tgt_model = tgt_cfg["model_prefix"] + ".model"
+    if main_process:
+        src_model = train_sentencepiece_from_files(
+            [data_path(cfg, "train", src_lang)],
+            src_cfg["model_prefix"],
+            src_cfg["vocab_size"],
+            src_cfg["character_coverage"],
+            src_cfg.get("model_type", "unigram"),
+            src_cfg.get("input_sentence_size", 0),
+            src_cfg.get("max_sentence_length", 4192),
+        )
+        tgt_model = train_sentencepiece_from_files(
+            [data_path(cfg, "train", tgt_lang)],
+            tgt_cfg["model_prefix"],
+            tgt_cfg["vocab_size"],
+            tgt_cfg["character_coverage"],
+            tgt_cfg.get("model_type", "unigram"),
+            tgt_cfg.get("input_sentence_size", 0),
+            tgt_cfg.get("max_sentence_length", 4192),
+        )
+    if world_size > 1:
+        synchronize()
     return SentencePieceTokenizer(src_model), SentencePieceTokenizer(tgt_model)
 
 
@@ -223,8 +239,29 @@ def unwrap_model(model):
     # Handle DDP wrapper
     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
         model = model.module
+    if isinstance(model, torch.nn.DataParallel):
+        model = model.module
     # Handle torch.compile wrapper
     return getattr(model, "_orig_mod", model)
+
+
+def wrap_parallel_model(model, cfg, device):
+    if get_world_size() > 1:
+        local_rank = get_local_rank()
+        if device.type == "cuda":
+            return torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+        return torch.nn.parallel.DistributedDataParallel(model)
+
+    if (
+        cfg.get("distributed", {}).get("enabled", False)
+        and device.type == "cuda"
+        and torch.cuda.device_count() > 1
+    ):
+        device_ids = list(range(torch.cuda.device_count()))
+        print(f"[parallel] using DataParallel across GPUs {device_ids}")
+        return torch.nn.DataParallel(model, device_ids=device_ids)
+
+    return model
 
 
 def fixed_subset(dataset, sample_size, seed):
@@ -454,10 +491,7 @@ def train_mlm(cfg):
 
     model = build_encoder(cfg, src_tokenizer).to(device)
     model = maybe_compile(model, cfg, device)
-    
-    # Wrap with DDP if in distributed mode
-    if world_size > 1:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+    model = wrap_parallel_model(model, cfg, device)
     
     if is_main_process():
         print(f"[mlm] params={count_parameters(unwrap_model(model))/1e6:.2f}M trainable={count_trainable_parameters(unwrap_model(model))/1e6:.2f}M")
@@ -567,10 +601,7 @@ def train_clm(cfg):
 
     model = build_decoder(cfg, tgt_tokenizer).to(device)
     model = maybe_compile(model, cfg, device)
-    
-    # Wrap with DDP if in distributed mode
-    if world_size > 1:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+    model = wrap_parallel_model(model, cfg, device)
     
     if is_main_process():
         print(f"[clm] params={count_parameters(unwrap_model(model))/1e6:.2f}M trainable={count_trainable_parameters(unwrap_model(model))/1e6:.2f}M")
@@ -692,10 +723,7 @@ def train_mt(cfg):
     model = build_mt_model(cfg, src_tokenizer, tgt_tokenizer).to(device)
     load_warm_start(cfg, model, device)
     model = maybe_compile(model, cfg, device)
-    
-    # Wrap with DDP if in distributed mode
-    if world_size > 1:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+    model = wrap_parallel_model(model, cfg, device)
     
     if is_main_process():
         print(f"[mt] params={count_parameters(unwrap_model(model))/1e6:.2f}M trainable={count_trainable_parameters(unwrap_model(model))/1e6:.2f}M")
@@ -886,12 +914,6 @@ def main():
     parser.add_argument("--stage", required=True, choices=["mlm", "clm", "mt", "eval", "plot"])
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training (auto-set by launcher)")
     args = parser.parse_args()
-    
-    # Initialize distributed training if launched with torchrun/torch.distributed.launch
-    if args.local_rank != -1 or "RANK" in os.environ:
-        rank, world_size, local_rank = setup_distributed()
-    else:
-        rank, world_size, local_rank = 0, 1, 0
 
     config_path = args.config
     if not os.path.isabs(config_path) and not os.path.exists(config_path):
@@ -902,6 +924,12 @@ def main():
     os.chdir(repo_root)
     cfg = load_config(config_path)
     cfg.setdefault("evaluation", {})
+
+    # If the user launched with torchrun, initialize DDP. Otherwise the model
+    # stage code will fall back to DataParallel when multiple GPUs are visible.
+    if args.local_rank != -1 or "RANK" in os.environ:
+        setup_distributed(cfg.get("distributed", {}).get("backend"))
+
     set_seed(cfg["training"]["seed"])
 
     try:
