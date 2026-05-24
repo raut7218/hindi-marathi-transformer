@@ -20,6 +20,7 @@ checkpoints/
 checkpoints_*/
 runs/
 wandb/
+pytest-tmp/
 *.pt
 *.pth
 *.ckpt
