@@ -22,6 +22,13 @@ def setup_distributed():
     
     # Only initialize if world_size > 1 (multi-GPU mode)
     if world_size > 1:
+        # Check if CUDA is available
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                f"Distributed training requested (world_size={world_size}) but CUDA is not available. "
+                "Please ensure PyTorch is installed with CUDA support or run with a single GPU/CPU."
+            )
+        
         # Set the device
         torch.cuda.set_device(local_rank)
         

@@ -333,6 +333,13 @@ def load_warm_start(cfg, model, device):
     mt_cfg = cfg.get("mt", {})
     enc_ckpt = mt_cfg.get("encoder_checkpoint")
     dec_ckpt = mt_cfg.get("decoder_checkpoint")
+    
+    # Convert relative paths to absolute paths (relative to repo_root for consistency)
+    if enc_ckpt and not os.path.isabs(enc_ckpt):
+        enc_ckpt = os.path.join(repo_root, enc_ckpt)
+    if dec_ckpt and not os.path.isabs(dec_ckpt):
+        dec_ckpt = os.path.join(repo_root, dec_ckpt)
+    
     if enc_ckpt:
         load_checkpoint(enc_ckpt, model.encoder, map_location=device)
         print(f"[warm-start] loaded encoder: {enc_ckpt}")

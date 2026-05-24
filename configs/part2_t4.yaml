@@ -71,6 +71,6 @@ evaluation:
   checkpoint:
 
 mt:
-  encoder_checkpoint: checkpoints_part2/mlm/encoder_mlm_step500.pt
-  decoder_checkpoint: checkpoints_part2/clm/decoder_clm_step500.pt
+  encoder_checkpoint: checkpoints_part2/mlm/encoder_mlm_final_step200.pt
+  decoder_checkpoint: checkpoints_part2/clm/decoder_clm_final_step200.pt
   freeze_pretrained: false
