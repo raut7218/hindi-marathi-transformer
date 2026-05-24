@@ -403,7 +403,7 @@ def compute_mlm_loss(model, batch, tokenizer, device, amp_dtype):
     input_ids, attn_mask, labels = make_mlm_batch(batch, tokenizer)
     input_ids, attn_mask, labels = move_to_device([input_ids, attn_mask, labels], device)
     with autocast_context(device, amp_dtype):
-        logits = model.forward_mlm(input_ids, attn_mask=attn_mask)
+        logits = unwrap_model(model).forward_mlm(input_ids, attn_mask=attn_mask)
         return F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=-100)
 
 
