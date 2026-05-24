@@ -25,7 +25,7 @@ pip install -r requirements.txt
 
 ## Google Colab Single T4
 
-Use the Colab launcher for a single T4. It runs plain Python, avoids NCCL/DDP, and writes smaller model-only checkpoints under `checkpoints_colab/`.
+Use the Colab launcher for a single T4. It runs plain Python, avoids NCCL/DDP, and writes smaller model-only checkpoints under `checkpoints_colab/`. The Colab config trains each stage for 1000 optimizer steps and uses a larger microbatch to better use T4 memory.
 
 ```bash
 cd /content/hindi-marathi-transformer
@@ -77,6 +77,10 @@ The Colab config uses:
 
 ```yaml
 training:
+  batch_size: 10
+  grad_accum_steps: 6
+  max_steps: 1000
+  warmup_steps: 100
   save_every: 0
   save_optimizer_state: false
   save_scaler_state: false
@@ -84,6 +88,14 @@ training:
 ```
 
 That disables large intermediate checkpoints and keeps final checkpoints smaller. Multi-GPU saves synchronize ranks before and after rank 0 writes, so other ranks do not continue into DDP collectives while rank 0 is checkpointing.
+
+The MT warm-start paths in the Colab config point to:
+
+```yaml
+mt:
+  encoder_checkpoint: checkpoints_colab/mlm/encoder_mlm_final_step1000.pt
+  decoder_checkpoint: checkpoints_colab/clm/decoder_clm_final_step1000.pt
+```
 
 ## Parameter Targets
 

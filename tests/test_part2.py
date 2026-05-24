@@ -324,6 +324,11 @@ def test_colab_config_is_single_gpu_and_model_only():
 
     assert cfg["distributed"]["enabled"] is False
     assert cfg["training"]["output_dir"] == "checkpoints_colab"
+    assert cfg["training"]["batch_size"] == 10
+    assert cfg["training"]["grad_accum_steps"] == 6
+    assert cfg["training"]["max_steps"] == 1000
+    assert cfg["training"]["warmup_steps"] == 100
     assert cfg["training"]["save_every"] == 0
     assert cfg["training"]["save_optimizer_state"] is False
     assert cfg["mt"]["encoder_checkpoint"].startswith("checkpoints_colab/")
+    assert cfg["mt"]["encoder_checkpoint"].endswith("step1000.pt")

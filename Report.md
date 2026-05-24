@@ -710,23 +710,26 @@ Why cosine?
 
 ### 16.5 Gradient Accumulation
 
-The strict config uses:
+The Colab T4 config uses:
 
 ```yaml
-batch_size: 8
-grad_accum_steps: 8
+batch_size: 10
+grad_accum_steps: 6
+max_steps: 1000
+warmup_steps: 100
 ```
 
 This means effective batch size is approximately:
 
 ```text
-8 x 8 = 64 examples per optimizer step
+10 x 6 = 60 examples per optimizer step
 ```
 
 Why?
 
 - A full 110M/124M model may not fit a large batch on one GPU.
 - Gradient accumulation simulates a larger batch using smaller microbatches.
+- This setting uses more of a single T4's memory than the earlier 8-by-8 setup while keeping the effective batch size nearly the same.
 
 ### 16.6 Mixed Precision
 

@@ -36,12 +36,12 @@ models:
 
 training:
   seed: 42
-  batch_size: 8
-  max_auto_batch_size: 64
+  batch_size: 10
+  max_auto_batch_size: 16
   auto_batch_size: true
-  grad_accum_steps: 8
-  max_steps: 2000
-  warmup_steps: 200
+  grad_accum_steps: 6
+  max_steps: 1000
+  warmup_steps: 100
   lr: 3.0e-4
   stage_lrs:
     mlm: 3.0e-4
@@ -76,8 +76,8 @@ evaluation:
   checkpoint:
 
 mt:
-  encoder_checkpoint: checkpoints_colab/mlm/encoder_mlm_final_step2000.pt
-  decoder_checkpoint: checkpoints_colab/clm/decoder_clm_final_step2000.pt
+  encoder_checkpoint: checkpoints_colab/mlm/encoder_mlm_final_step1000.pt
+  decoder_checkpoint: checkpoints_colab/clm/decoder_clm_final_step1000.pt
   freeze_pretrained: false
   cross_only_steps: 300
   pretrained_lr_mult: 0.3
