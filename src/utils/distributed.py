@@ -35,15 +35,20 @@ def setup_distributed(backend=None):
                 "Please ensure PyTorch is installed with CUDA support or run with a single GPU/CPU."
             )
         
-        # Set the device
         torch.cuda.set_device(local_rank)
-        
-        # Initialize the process group
-        dist.init_process_group(
-            backend=backend,
-            rank=rank,
-            world_size=world_size,
-        )
+
+        init_kwargs = {
+            "backend": backend,
+            "rank": rank,
+            "world_size": world_size,
+        }
+        if backend == "nccl":
+            init_kwargs["device_id"] = torch.device(f"cuda:{local_rank}")
+        try:
+            dist.init_process_group(**init_kwargs)
+        except TypeError:
+            init_kwargs.pop("device_id", None)
+            dist.init_process_group(**init_kwargs)
         print(f"[distributed] rank={rank} world_size={world_size} local_rank={local_rank} backend={backend} initialized")
     else:
         print(f"[distributed] single GPU mode (world_size=1)")
@@ -116,6 +121,12 @@ def synchronize():
     Only has effect in distributed mode.
     """
     if get_world_size() > 1:
+        if dist.get_backend() == "nccl" and torch.cuda.is_available():
+            try:
+                dist.barrier(device_ids=[get_local_rank()])
+                return
+            except TypeError:
+                pass
         dist.barrier()
 
 

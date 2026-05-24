@@ -126,11 +126,6 @@ def prepare_tokenizers(cfg):
     world_size = get_world_size()
     main_process = is_main_process()
 
-    # In distributed jobs, rank 0 prepares the tokenizer files once and the
-    # other ranks wait until the files are ready.
-    if world_size > 1 and not main_process:
-        synchronize()
-
     if "tokenizers" not in cfg or cfg.get("tokenizers", {}).get("shared", False):
         tok_cfg = cfg.get("tokenizer", cfg.get("tokenizers", {}).get("shared_config", {}))
         model_path = tok_cfg["model_prefix"] + ".model"
@@ -313,6 +308,15 @@ def auto_tune_batch_size(make_test_loader, test_step, cfg, device):
     raise RuntimeError("Unable to find a working batch size")
 
 
+def select_batch_size(make_test_loader, test_step, cfg, device):
+    batch_size = cfg["training"]["batch_size"]
+    if get_world_size() > 1:
+        if is_main_process() and cfg["training"].get("auto_batch_size", False):
+            print(f"[batch] DDP mode uses configured microbatch={batch_size}; auto-tune disabled")
+        return batch_size
+    return auto_tune_batch_size(make_test_loader, test_step, cfg, device)
+
+
 class MetricLogger:
     def __init__(self, out_dir, stage):
         self.jsonl_path = os.path.join(out_dir, f"{stage}_metrics.jsonl")
@@ -467,7 +471,6 @@ def evaluate_mt_metrics(model, dataset, src_tokenizer, tgt_tokenizer, cfg, batch
 
 
 def train_mlm(cfg):
-    # Setup distributed training
     rank = get_rank()
     world_size = get_world_size()
     local_rank = get_local_rank()
@@ -505,17 +508,7 @@ def train_mlm(cfg):
         scaler.scale(loss).backward()
         optimizer.zero_grad(set_to_none=True)
 
-    # Auto-tune only on rank 0
-    if is_main_process():
-        batch_size = auto_tune_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
-    else:
-        batch_size = cfg["training"]["batch_size"]
-    
-    # Broadcast batch size to all ranks
-    if world_size > 1:
-        batch_size_tensor = torch.tensor(batch_size, device=device)
-        torch.distributed.broadcast(batch_size_tensor, src=0)
-        batch_size = int(batch_size_tensor.item())
+    batch_size = select_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
     
     loader = make_loader(train_dataset, cfg, batch_size, True)
     grad_accum = cfg["training"]["grad_accum_steps"]
@@ -577,7 +570,6 @@ def train_mlm(cfg):
 
 
 def train_clm(cfg):
-    # Setup distributed training
     rank = get_rank()
     world_size = get_world_size()
     local_rank = get_local_rank()
@@ -615,17 +607,7 @@ def train_clm(cfg):
         scaler.scale(loss).backward()
         optimizer.zero_grad(set_to_none=True)
 
-    # Auto-tune only on rank 0
-    if is_main_process():
-        batch_size = auto_tune_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
-    else:
-        batch_size = cfg["training"]["batch_size"]
-    
-    # Broadcast batch size to all ranks
-    if world_size > 1:
-        batch_size_tensor = torch.tensor(batch_size, device=device)
-        torch.distributed.broadcast(batch_size_tensor, src=0)
-        batch_size = int(batch_size_tensor.item())
+    batch_size = select_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
     
     loader = make_loader(train_dataset, cfg, batch_size, True)
     grad_accum = cfg["training"]["grad_accum_steps"]
@@ -686,7 +668,6 @@ def train_clm(cfg):
 
 
 def train_mt(cfg):
-    # Setup distributed training
     rank = get_rank()
     world_size = get_world_size()
     local_rank = get_local_rank()
@@ -737,17 +718,7 @@ def train_mt(cfg):
         scaler.scale(loss).backward()
         optimizer.zero_grad(set_to_none=True)
 
-    # Auto-tune only on rank 0
-    if is_main_process():
-        batch_size = auto_tune_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
-    else:
-        batch_size = cfg["training"]["batch_size"]
-    
-    # Broadcast batch size to all ranks
-    if world_size > 1:
-        batch_size_tensor = torch.tensor(batch_size, device=device)
-        torch.distributed.broadcast(batch_size_tensor, src=0)
-        batch_size = int(batch_size_tensor.item())
+    batch_size = select_batch_size(lambda bs: make_loader(train_dataset, cfg, bs, True), tune_step, cfg, device)
     
     loader = make_loader(train_dataset, cfg, batch_size, True)
     train_eval_dataset = fixed_subset(train_dataset, cfg["evaluation"].get("sample_train", 128), cfg["training"]["seed"])

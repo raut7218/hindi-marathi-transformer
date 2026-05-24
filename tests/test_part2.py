@@ -1,8 +1,14 @@
 import json
+import sys
 from pathlib import Path
 
 import torch
 
+repo_root = Path(__file__).resolve().parents[1]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
+import scripts.train as train_module
 from scripts.train import plot_metrics
 from src.models.transformer import DecoderModel, EncoderModel, Seq2SeqModel
 from src.utils.params import count_parameters
@@ -89,3 +95,58 @@ def test_plot_generation_from_fake_metrics(tmp_path):
     assert (tmp_path / "out" / "plots" / "loss.png").exists()
     assert (tmp_path / "out" / "plots" / "bleu_100.png").exists()
     assert (tmp_path / "out" / "plots" / "chrfpp_100.png").exists()
+
+
+def test_prepare_tokenizers_distributed_uses_one_matching_barrier(monkeypatch):
+    cfg = {
+        "data": {"data_dir": "data", "src_lang": "hi", "tgt_lang": "mr"},
+        "tokenizers": {
+            "shared": False,
+            "src": {"model_prefix": "data/spm_hi", "vocab_size": 100, "character_coverage": 0.9995},
+            "tgt": {"model_prefix": "data/spm_mr", "vocab_size": 100, "character_coverage": 0.9995},
+        },
+    }
+
+    class FakeTokenizer:
+        def __init__(self, model_path):
+            self.model_path = model_path
+
+    for main_process in (True, False):
+        calls = {"sync": 0, "train": 0}
+
+        def fake_train(input_paths, model_prefix, *args):
+            calls["train"] += 1
+            return model_prefix + ".model"
+
+        monkeypatch.setattr(train_module, "get_world_size", lambda: 2)
+        monkeypatch.setattr(train_module, "is_main_process", lambda main=main_process: main)
+        monkeypatch.setattr(train_module, "synchronize", lambda: calls.__setitem__("sync", calls["sync"] + 1))
+        monkeypatch.setattr(train_module, "train_sentencepiece_from_files", fake_train)
+        monkeypatch.setattr(train_module, "SentencePieceTokenizer", FakeTokenizer)
+
+        src_tokenizer, tgt_tokenizer = train_module.prepare_tokenizers(cfg)
+
+        assert calls["sync"] == 1
+        assert calls["train"] == (2 if main_process else 0)
+        assert src_tokenizer.model_path == "data/spm_hi.model"
+        assert tgt_tokenizer.model_path == "data/spm_mr.model"
+
+
+def test_select_batch_size_ddp_skips_auto_tune(monkeypatch):
+    cfg = {"training": {"batch_size": 8, "auto_batch_size": True}}
+
+    def fail_auto_tune(*args, **kwargs):
+        raise AssertionError("DDP should not run rank-local auto tuning")
+
+    monkeypatch.setattr(train_module, "get_world_size", lambda: 2)
+    monkeypatch.setattr(train_module, "is_main_process", lambda: True)
+    monkeypatch.setattr(train_module, "auto_tune_batch_size", fail_auto_tune)
+
+    batch_size = train_module.select_batch_size(
+        lambda bs: None,
+        lambda batch: None,
+        cfg,
+        torch.device("cpu"),
+    )
+
+    assert batch_size == 8
