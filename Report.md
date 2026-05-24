@@ -1187,7 +1187,17 @@ Possible improvement:
   - first freeze pretrained weights and train cross-attention
   - then unfreeze everything
 
-## 27. Interview Q&A
+## 27. Development Disclosure
+
+### 27.1 GPU Hardware Used
+
+Training and debugging were run in a Kaggle environment with 2 GPUs available for distributed training. The repository logs capture the multi-GPU setup used for the final MT run.
+
+### 27.2 LLM Assistance Used
+
+GitHub Copilot Chat was used during development for code assistance, report editing, and debugging support. All final code and report content were reviewed and adapted for the submission.
+
+## 28. Interview Q&A
 
 ### Q1. What exactly did you build?
 
@@ -1309,7 +1319,7 @@ Source and target positions are not the same timeline. RoPE is cleanest for self
 
 On CUDA, it tries larger microbatch sizes until an out-of-memory error occurs, then keeps the largest working size. This helps use GPU memory efficiently.
 
-## 28. Suggested Interview Walkthrough
+## 29. Suggested Interview Walkthrough
 
 A strong explanation order:
 
@@ -1325,7 +1335,7 @@ Short version:
 
 > The system first learns Hindi understanding through MLM and Marathi fluency through CLM. Then I connect them with cross-attention and fine-tune on parallel Hindi-Marathi pairs. The Transformer blocks use RoPE for positional encoding, GQA for efficient attention, and RMSNorm for stable modern pre-norm training.
 
-## 29. Files to Mention During Interview
+## 30. Files to Mention During Interview
 
 If asked where something is implemented:
 
@@ -1343,7 +1353,7 @@ If asked where something is implemented:
 | LR schedule | `src/utils/schedule.py` |
 | Parameter count tests | `tests/test_part2.py` |
 
-## 30. Final Defense Statement
+## 31. Final Defense Statement
 
 This solution is defensible because it implements the required architecture directly rather than wrapping a pretrained library model. It shows understanding of both language-model pretraining and sequence-to-sequence translation. The encoder is trained for source understanding, the decoder is trained for target fluency, and the MT model combines both through cross-attention.
 

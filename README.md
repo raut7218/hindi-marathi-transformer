@@ -38,8 +38,8 @@ Set the warm-start checkpoints in `configs/part2_t4.yaml`:
 
 ```yaml
 mt:
-  encoder_checkpoint: checkpoints_part2/mlm/encoder_mlm_final_step200.pt
-  decoder_checkpoint: checkpoints_part2/clm/decoder_clm_final_step200.pt
+  encoder_checkpoint: checkpoints_part2/mlm/encoder_mlm_final_step2000.pt
+  decoder_checkpoint: checkpoints_part2/clm/decoder_clm_final_step2000.pt
   freeze_pretrained: false
 ```
 
