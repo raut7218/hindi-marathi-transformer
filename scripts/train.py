@@ -569,8 +569,12 @@ def evaluate_mt_metrics(model, dataset, src_tokenizer, tgt_tokenizer, cfg, batch
     preds = []
     refs = []
     model.eval()
+    total_samples = len(subset)
+    total_batches = len(loader)
+    print(f"[eval] decoding {total_samples} samples in {total_batches} batches", flush=True)
+    progress_every = max(1, total_batches // 10)
     with torch.no_grad():
-        for batch in loader:
+        for batch_idx, batch in enumerate(loader, start=1):
             src_ids, src_mask, _, _, labels = make_mt_batch(batch, src_tokenizer, tgt_tokenizer)
             src_ids, src_mask = move_to_device([src_ids, src_mask], device)
             out_ids = greedy_decode(
@@ -589,6 +593,8 @@ def evaluate_mt_metrics(model, dataset, src_tokenizer, tgt_tokenizer, cfg, batch
             for lbl in labels.tolist():
                 lbl = [t for t in lbl if t != -100 and t != tgt_tokenizer.pad_id]
                 refs.append(tgt_tokenizer.decode(lbl))
+            if batch_idx == 1 or batch_idx % progress_every == 0 or batch_idx == total_batches:
+                print(f"[eval] progress {min(len(preds), total_samples)}/{total_samples}", flush=True)
     model.train()
     return compute_bleu_chrf(preds, refs)
 
@@ -959,9 +965,13 @@ def evaluate_mt(cfg):
     ckpt = cfg.get("evaluation", {}).get("checkpoint")
     if not ckpt:
         raise ValueError("Set evaluation.checkpoint in the config for --stage eval")
+    print(f"[eval] loading checkpoint {ckpt}", flush=True)
     load_checkpoint(ckpt, model, map_location=device)
     batch_size = cfg["evaluation"].get("batch_size", 8)
     max_samples = cfg["evaluation"].get("final_samples", 0)
+    if not max_samples or max_samples <= 0:
+        max_samples = cfg["evaluation"].get("sample_valid", 128)
+    print(f"[eval] using up to {max_samples} test samples", flush=True)
     bleu, chrf = evaluate_mt_metrics(model, dataset, src_tokenizer, tgt_tokenizer, cfg, batch_size, max_samples)
     print(f"[eval] BLEU={bleu:.2f} CHRF++={chrf:.2f}")
 
@@ -986,6 +996,7 @@ def plot_metrics(cfg):
         os.path.join(root, "mt", "mt_metrics.jsonl"),
         cfg.get("evaluation", {}).get("metrics_path", ""),
     ]
+    print(f"[plot] loading metrics from {', '.join(p for p in paths if p)}", flush=True)
     rows = load_metric_rows(paths)
     if not rows:
         raise ValueError("No metric rows found for plotting")
