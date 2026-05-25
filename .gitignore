@@ -15,26 +15,21 @@ env/
 .env
 .env.*
 
-# Training outputs and checkpoints
+# Training outputs and checkpoints (large binary files)
 checkpoints/
-checkpoints_*/
+checkpoints_part2/
 runs/
 wandb/
 pytest-tmp/
+
+# Checkpoint binaries (too large for Git, document download separately)
 *.pt
 *.pth
 *.ckpt
 *.safetensors
 
-# Generated tokenizer artifacts
-data/*.model
-data/*.vocab
+# Generated tokenizer corpus files (intermediate)
 data/*_corpus.txt
-
-# Generated metrics and plots
-*.jsonl
-*.csv
-plots/
 
 # Local scratch test file
 /test0.py
@@ -44,3 +39,29 @@ plots/
 Thumbs.db
 .idea/
 .vscode/
+
+# ── TRACKED DELIVERABLES ──
+# The following are explicitly UN-ignored so they appear in the repo:
+
+# Plots (required by assignment)
+!checkpoints_colab/
+!checkpoints_colab/plots/
+!checkpoints_colab/plots/*.png
+
+# Metrics CSV and JSONL (required for reproducibility)
+!checkpoints_colab/mlm/
+!checkpoints_colab/mlm/*.csv
+!checkpoints_colab/mlm/*.jsonl
+!checkpoints_colab/mlm/*.yaml
+!checkpoints_colab/clm/
+!checkpoints_colab/clm/*.csv
+!checkpoints_colab/clm/*.jsonl
+!checkpoints_colab/clm/*.yaml
+!checkpoints_colab/mt/
+!checkpoints_colab/mt/*.csv
+!checkpoints_colab/mt/*.jsonl
+!checkpoints_colab/mt/*.yaml
+
+# Tokenizer models (required for reproducibility)
+!data/*.model
+!data/*.vocab

@@ -2,7 +2,6 @@ data:
   data_dir: data
   src_lang: hi
   tgt_lang: mr
-
 tokenizers:
   shared: false
   src:
@@ -15,7 +14,6 @@ tokenizers:
     model_prefix: data/spm_mr_50257
     character_coverage: 0.9995
     model_type: unigram
-
 models:
   encoder:
     d_model: 768
@@ -33,7 +31,6 @@ models:
     ffn_dim: 3584
     dropout: 0.1
     max_seq_len: 128
-
 training:
   seed: 42
   batch_size: 10
@@ -42,11 +39,11 @@ training:
   grad_accum_steps: 6
   max_steps: 1000
   warmup_steps: 100
-  lr: 3.0e-4
+  lr: 0.0003
   stage_lrs:
-    mlm: 3.0e-4
-    clm: 3.0e-4
-    mt: 1.0e-4
+    mlm: 0.0003
+    clm: 0.0003
+    mt: 0.0001
   weight_decay: 0.01
   grad_clip: 1.0
   label_smoothing:
@@ -61,11 +58,9 @@ training:
   amp_dtype: fp16
   compile: false
   output_dir: checkpoints_colab
-
 distributed:
   enabled: false
   backend: nccl
-
 evaluation:
   batch_size: 8
   loss_batch_size: 8
@@ -73,8 +68,7 @@ evaluation:
   sample_train: 128
   sample_valid: 128
   final_samples: 0
-  checkpoint: checkpoints_colab/mt/mt_final_step1000.pt
-
+  checkpoint: null
 mt:
   encoder_checkpoint: checkpoints_colab/mlm/encoder_mlm_final_step1000.pt
   decoder_checkpoint: checkpoints_colab/clm/decoder_clm_final_step1000.pt
