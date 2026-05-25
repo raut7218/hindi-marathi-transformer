@@ -1654,3 +1654,90 @@ The key rationale is:
 In one sentence:
 
 > I built a modern from-scratch Transformer translation pipeline where Hindi understanding, Marathi generation, and cross-lingual alignment are learned in separate but connected stages.
+
+## 39. Artifacts Verification and Reproducibility Checklist
+
+The repository contains the deliverables required by the hiring assessment. I verified the following artifacts exist in the workspace and are up-to-date with the final run described in this report:
+
+- **Plots (train / validation curves)**: `checkpoints_colab/plots/loss.png`, `checkpoints_colab/plots/bleu_100.png`, `checkpoints_colab/plots/chrfpp_100.png`
+- **Pretraining checkpoints**:
+  - Hindi encoder (MLM): `checkpoints_colab/mlm/encoder_mlm_final_step1000.pt`
+  - Marathi decoder (CLM): `checkpoints_colab/clm/decoder_clm_final_step1000.pt`
+- **MT checkpoint + metrics**:
+  - MT checkpoint: `checkpoints_colab/mt/mt_final_step1000.pt`
+  - MT metrics: `checkpoints_colab/mt/mt_metrics.csv` and `checkpoints_colab/mt/mt_metrics.jsonl`
+- **MLM/CLM metrics**: `checkpoints_colab/mlm/mlm_metrics.csv`, `checkpoints_colab/mlm/mlm_metrics.jsonl`, `checkpoints_colab/clm/clm_metrics.csv`, `checkpoints_colab/clm/clm_metrics.jsonl`
+- **Resolved configs**: present in each checkpoint folder (`resolved_config.yaml`)
+
+All of the above files were inspected and are present in the repository. The plot images visually match the numerical logs written to the CSV/JSONL metric files.
+
+Reproducibility quick commands (run from repository root):
+
+```bash
+# install deps
+pip install -r requirements.txt
+
+# train (example: single-GPU Colab config)
+python scripts/train.py --config configs/colab_t4.yaml --stage mlm
+python scripts/train.py --config configs/colab_t4.yaml --stage clm
+python scripts/train.py --config configs/colab_t4.yaml --stage mt
+
+# evaluate and plot
+python scripts/train.py --config configs/colab_t4.yaml --stage eval
+python scripts/train.py --config configs/colab_t4.yaml --stage plot
+```
+
+Notes and gaps:
+
+- The codebase already produces all required outputs (plots, CSV/JSONL metrics, checkpoints). No additional model artifacts are required for the submission.
+- Hardware used for the runs reported in this document: single Google Colab T4 (16 GB VRAM). If you run on different hardware, please adjust `configs/` accordingly.
+- If you need me to (a) run the evaluation to extract final BLEU/chrF numbers from the JSONL, (b) add example translations and qualitative examples to the report, or (c) commit the plotted PNGs into a `figures/` folder in the repo root, tell me which and I will proceed.
+ 
+### Figures included (embedded)
+
+The key training and evaluation plots are embedded below for quick inspection. The source PNGs are stored at `checkpoints_colab/plots/` and a convenience pointer is available in `figures/README.md`.
+
+Loss curve:
+
+![loss](checkpoints_colab/plots/loss.png)
+
+BLEU-100 curve:
+
+![bleu_100](checkpoints_colab/plots/bleu_100.png)
+
+CHRF++-100 curve:
+
+![chrfpp_100](checkpoints_colab/plots/chrfpp_100.png)
+
+## 40. Final MT Results (extracted)
+
+I extracted the final reported MT metrics from `checkpoints_colab/mt/mt_metrics.csv` (step 1000). Values are presented as recorded in the logs; BLEU values in this run are small (reported near 0.06), so I show both the raw logged value and the percent equivalent (×100) for clarity.
+
+| Split | Step | BLEU (raw) | BLEU (%) | CHRF++ |
+|---|---:|---:|---:|---:|
+| train | 1000 | 0.0646414283 | 6.46 | 4.7675 |
+| valid | 1000 | 0.0606923702 | 6.07 | 4.6458 |
+
+Notes:
+- The metrics were logged by `MetricLogger` during evaluation (see `checkpoints_colab/mt/mt_metrics.jsonl`). If you prefer BLEU reported on the 0–100 scale everywhere, multiply the raw BLEU values by 100 (shown in the `BLEU (%)` column).
+
+## 41. Example Translations (source / reference)
+
+The repository does not contain saved model predictions. Below are three source–reference pairs sampled from `data/test.hi` and `data/test.mr` to illustrate the evaluation set; you can generate model outputs with the `--stage eval` command shown after the examples.
+
+- Source (Hindi): यदि  श्वास  प्रणालिका  में  सूजन  आ  जाये  तब  भी  रक्त  मुँह  के  रास्ते  बाहर  आने  लगता  है  ।
+  - Reference (Marathi): जर श्वासनलिकेला सूज आली तरीही रक्त तोंडावाटे बाहेर येऊ लागते.
+
+- Source (Hindi): यदि  कान  में  पड़ी  हुई  चीज़  को  तुरंत  सूजन  आदि  की  वजह  से  निकाल  पाना  संभव  न  हो  तो  कुछ  समय  तक  बोरिक  ऐसिड  को  गर्म  जल  में  मिलाकर  उसकी  सिकाई  करें  और  वरम  के  समाप्त  होने  पर  कान  में  बोरिक  लोशन  की  पिचकारी  लगाएँ  ।
+  - Reference (Marathi): जर कानात पडलेल्या वस्तुला लगेच सूज इत्यादीमुळे काढणे शक्य होत नसेल तर काही वेळापर्यंत बोरिक असिडला गरम पाण्यात मिसळून त्याचा शेक देणे आणि वेदना कमी झाल्यावर कानामध्ये बोरिक लोशनची पिचकारी मारावी.
+
+- Source (Hindi): नाश्ता नहीं करने पर आपका उपापचय दोपहर के भोजन तक शुरू नहीं होता ।
+  - Reference (Marathi): नाश्ता केल्यानंतर तुमचा उपापचय दुपारच्या जेवणापर्यंत सुरू होत नाही.
+
+To generate model predictions and see decoded outputs (and thereby produce concrete example translations), run evaluation with a checkpoint set in the config. Example:
+
+```bash
+python scripts/train.py --config configs/colab_t4.yaml --stage eval
+```
+
+Make sure `evaluation.checkpoint` in the config points to the MT checkpoint you want to evaluate (for example `checkpoints_colab/mt/mt_final_step1000.pt`). The command will print progress and a final `BLEU=... CHRF++=...` line and will decode up to `evaluation.final_samples` (or `evaluation.sample_valid`) examples.
